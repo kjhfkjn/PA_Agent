@@ -83,6 +83,20 @@ class TradingViewExtensionSource(TradingViewSource):
             raise DataSourceTransientError("扩展捕获的数据未通过 PA Agent 校验")
         return bars
 
+    def analysis_features(self) -> tuple[dict, ...]:
+        """Get extensible context from the full captured (cutoff-aware) history."""
+        if not self._connected or not self._symbol or not self._timeframe:
+            return ()
+        from pa_agent.data.tradingview_features import build_tradingview_features
+
+        try:
+            rows = self._bridge.get_snapshot(self._symbol, self._timeframe, 10_000)
+        except RuntimeError:
+            return ()
+        return build_tradingview_features(
+            rows, symbol=self._symbol, source_timeframe=self._timeframe
+        )
+
     @property
     def bridge_status(self) -> dict[str, object]:
         return self._bridge.status()

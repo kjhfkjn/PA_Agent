@@ -34,6 +34,7 @@ class AnalysisPrepWorker(QThread):
         now_ms: int,
         force_incremental: bool,
         incremental_threshold: int,
+        external_features: tuple[dict, ...] = (),
         parent: Any = None,
     ) -> None:
         super().__init__(parent)
@@ -44,6 +45,7 @@ class AnalysisPrepWorker(QThread):
         self._now_ms = now_ms
         self._force_incremental = force_incremental
         self._incremental_threshold = incremental_threshold
+        self._external_features = tuple(external_features)
 
     def run(self) -> None:
         try:
@@ -64,6 +66,10 @@ class AnalysisPrepWorker(QThread):
             if frame is None:
                 self.failed.emit("数据不足，无法构建分析快照")
                 return
+            if self._external_features:
+                from dataclasses import replace
+
+                frame = replace(frame, external_features=self._external_features)
 
             previous = None
             incremental_new_bar_count: int | None = None

@@ -77,6 +77,9 @@ class KlineFrame:
     bars: tuple[KlineBar, ...]
     indicators: IndicatorBundle
     snapshot_ts_local_ms: int   # milliseconds since epoch, local time
+    # Extensible, source-backed context blocks (e.g. TradingView 1h levels).
+    # Each item is a JSON-compatible dict with source/type/timeframe/provenance/data.
+    external_features: tuple[dict, ...] = ()
 
 
 # ── DataSource ABC ────────────────────────────────────────────────────────────

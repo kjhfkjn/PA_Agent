@@ -3055,6 +3055,9 @@ class MainWindow(QMainWindow):
             now_ms=self._reference_now_ms(),
             force_incremental=force_incremental,
             incremental_threshold=threshold,
+            external_features=tuple(
+                getattr(getattr(self._ctx, "data_source", None), "analysis_features", lambda: ())()
+            ),
             parent=None,
         )
         self._prep_worker = prep

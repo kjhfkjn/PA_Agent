@@ -79,8 +79,8 @@ class OverlayLines:
                 anchor=(0.0, 0.5),
             )
 
-            plot.addItem(line)
-            plot.addItem(label)
+            plot.addItem(line, ignoreBounds=True)
+            plot.addItem(label, ignoreBounds=True)
             self._items.extend([line, label])
             self._labels.append((label, float(price)))
 

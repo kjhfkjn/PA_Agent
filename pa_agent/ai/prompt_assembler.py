@@ -1048,6 +1048,25 @@ class PromptAssembler:
             return prompt
         return inject_market_features_section(prompt, block)
 
+    @staticmethod
+    def _render_external_feature_blocks(frame: KlineFrame) -> str:
+        """Render source-provided feature records through one extensible contract."""
+        features = getattr(frame, "external_features", ()) or ()
+        if not features:
+            return ""
+        blocks = ["## 外部数据源特征（来源与周期必须一并考虑）"]
+        for feature in features:
+            if not isinstance(feature, dict):
+                continue
+            blocks.extend([
+                f"### {feature.get('feature_type', 'feature')} | {feature.get('timeframe', 'unknown')}",
+                *([f"说明：{feature['description']}"] if feature.get("description") else []),
+                f"来源：{feature.get('source', 'unknown')}；品种：{feature.get('symbol', frame.symbol)}",
+                f"时间口径：{feature.get('provenance', '未提供')}；截至：{feature.get('as_of_ms', 'unknown')}",
+                "数据：" + json.dumps(feature.get("data", {}), ensure_ascii=False, separators=(",", ":")),
+            ])
+        return "\n".join(blocks) if len(blocks) > 1 else ""
+
     # ── Stage 1 ───────────────────────────────────────────────────────────────
 
     def build_stage1(self, frame: KlineFrame, *, analysis_mode: str = "original") -> list[dict]:
@@ -1287,6 +1306,7 @@ class PromptAssembler:
         kline_table = self._render_kline_table(frame)
         feature_table = self._render_kline_feature_table(frame)
         simple_features_block = self._render_simple_market_features_block(frame)
+        external_feature_block = self._render_external_feature_blocks(frame)
         n_bars = len(frame.bars)
         if n_bars > 40:
             bg_window = f"**长程背景 K{n_bars}–K41**（较老部分）：\n"
@@ -1321,7 +1341,8 @@ class PromptAssembler:
             f"## K线数据(序号1=最新已收盘K线,序号越大越早;不含当前未收盘K线;"
             f"阳阴列由程序按收盘价与开盘价计算:收盘>开盘=阳线,收盘<开盘=阴线,相等=平)\n\n"
             f"{kline_table}\n\n"
-            "## K线几何特征(程序预计算；「类型」列为单字段 bar_type，判定优先级：inside/outside > doji/trend/flat/other；"
+            + (f"{external_feature_block}\n\n" if external_feature_block else "")
+            + "## K线几何特征(程序预计算；「类型」列为单字段 bar_type，判定优先级：inside/outside > doji/trend/flat/other；"
             "不替代周期判断；基于当前 N 根已收盘 K 线，指标非全历史延续)\n\n"
             f"{feature_table}\n\n"
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
@@ -1748,6 +1769,10 @@ class PromptAssembler:
                 kline_block += f"{simple_features_block}\n\n"
             if breakout_tick_hint:
                 kline_block += f"{breakout_tick_hint}\n\n"
+
+        external_feature_block = self._render_external_feature_blocks(frame)
+        if external_feature_block:
+            kline_block += f"{external_feature_block}\n\n"
 
         kline_intro = (
             "完整 K 线表见上方阶段一用户消息。\n\n"

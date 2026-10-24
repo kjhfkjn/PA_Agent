@@ -229,7 +229,7 @@ class ChartWidget(pg.PlotWidget):
                              style=pg.QtCore.Qt.PenStyle.DashLine),
                 movable=False,
             )
-            plot.addItem(line)
+            plot.addItem(line, ignoreBounds=True)
             self._sr_items.append(line)
 
             # Draw a zone fill if it's a range (high != low)
@@ -243,7 +243,7 @@ class ChartWidget(pg.PlotWidget):
                     brush=pg.mkBrush(color=zone_color),
                     pen=pg.mkPen(None),
                 )
-                plot.addItem(fill)
+                plot.addItem(fill, ignoreBounds=True)
                 self._sr_items.append(fill)
 
             # Label
@@ -252,7 +252,7 @@ class ChartWidget(pg.PlotWidget):
                 color=text_color,
                 anchor=(0.0, 0.5),
             )
-            plot.addItem(label)
+            plot.addItem(label, ignoreBounds=True)
             self._sr_items.append(label)
             label._sr_price = float(price)  # type: ignore[attr-defined]
 
@@ -538,7 +538,7 @@ class ChartWidget(pg.PlotWidget):
         font.setBold(True)
         marker.setFont(font)
         marker.setPos(x_pos, entry_f)
-        self.addItem(marker)
+        self.addItem(marker, ignoreBounds=True)
         self._direction_items.append(marker)
 
     def _clear_candles_and_labels(self) -> None:
