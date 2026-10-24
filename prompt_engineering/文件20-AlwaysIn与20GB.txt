@@ -28,7 +28,7 @@
 
 - **AIL 中首个做空反转** → 仅诊断；§14 逆势禁止（无例外）
 - **AIS 中首个做多反转** → 同上
-- 顺 Always In：信号不完美也可评估回撤入场（H1/H2、§9.0P 计划型限价）
+- 顺 Always In：可继续等待合格回撤信号并用止损触发单入场；限价仅按 §9.0P 的前一未回补突破缺口例外评估。
 - `bar_analysis.always_in` 与 `order_direction` 冲突时，reasoning 须写双确认
 
 ⚠️ **宽通道**：**禁止逆势**；仅顺 Always In / direction 一侧。
