@@ -45,7 +45,9 @@ el("captureNow").addEventListener("click", async () => {
   const button = el("captureNow");
   button.disabled = true;
   statusText("正在读取并校验图表数据…");
-  const result = await request("PA_AGENT_CAPTURE_NOW");
+  const result = await request("PA_AGENT_CAPTURE_NOW", {
+    historyCutoff: el("historyCutoff").value
+  });
   button.disabled = false;
   if (!result?.ok) statusText(result?.error || "同步失败", true);
   else {
