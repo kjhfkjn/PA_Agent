@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
+from pa_agent.data.context_timeframes import normalize_timeframe
+
 logger = logging.getLogger(__name__)
 
 BRIDGE_HOST = "127.0.0.1"
@@ -31,29 +33,7 @@ def _normalize_symbol(symbol: str) -> str:
 
 
 def _normalize_timeframe(value: str) -> str:
-    raw = str(value or "").strip()
-    upper = raw.upper()
-    # TradingView resolutions use bare minute counts (5, 60) and D/W/M.
-    # The app uses lowercase m/h/d/w and uppercase M for calendar months.
-    if raw.isdigit():
-        minutes = int(raw)
-        if minutes >= 60 and minutes % 60 == 0:
-            return f"{minutes // 60}h"
-        return f"{minutes}m"
-    aliases = {"D": "1d", "1D": "1d", "W": "1w", "1W": "1w", "M": "1M", "1MTH": "1M"}
-    if upper in aliases:
-        return aliases[upper]
-    if upper.endswith("H") and upper[:-1].isdigit():
-        return upper[:-1] + "h"
-    if upper.endswith("D") and upper[:-1].isdigit():
-        return upper[:-1] + "d"
-    if upper.endswith("W") and upper[:-1].isdigit():
-        return upper[:-1] + "w"
-    if raw.endswith("m") and raw[:-1].isdigit():
-        return raw
-    if upper.endswith("M") and upper[:-1].isdigit():
-        return upper
-    return raw
+    return normalize_timeframe(value)
 
 
 class TradingViewExtensionBridge:
@@ -67,7 +47,8 @@ class TradingViewExtensionBridge:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._snapshots: dict[tuple[str, str], dict[str, Any]] = {}
-        self._cutoff_time_ms: int | None = None
+        # Replay cutoffs belong to a chart snapshot. A global cutoff lets a
+        # later update from another timeframe silently truncate this chart.
         self._last_seen: float | None = None
         self._page_url = ""
         self._browser_symbol = ""
@@ -202,11 +183,23 @@ class TradingViewExtensionBridge:
             )
             snapshot = self._snapshots.get(key)
             rows = snapshot["bars"] if snapshot else {}
+            cutoff = snapshot.get("cutoffTime") if snapshot else None
             effective_rows = (
-                {ts: value for ts, value in rows.items() if ts <= self._cutoff_time_ms}
-                if self._cutoff_time_ms is not None
+                {ts: value for ts, value in rows.items() if ts <= cutoff}
+                if cutoff is not None
                 else rows
             )
+            recent_bars = [
+                {
+                    "time": timestamp,
+                    "open": values[0],
+                    "high": values[1],
+                    "low": values[2],
+                    "close": values[3],
+                    "volume": values[4],
+                }
+                for timestamp, values in sorted(effective_rows.items())[-5:]
+            ]
             return {
                 "ok": True,
                 "token": self._token,
@@ -219,9 +212,25 @@ class TradingViewExtensionBridge:
                 "desiredSymbol": self._desired_symbol,
                 "desiredTimeframe": self._desired_timeframe,
                 "barCount": sum(len(item["bars"]) for item in self._snapshots.values()),
-                "historyCutoff": self._cutoff_time_ms,
+                "historyCutoff": cutoff,
+                "historyCutoffSource": snapshot.get("cutoffSource", "unknown")
+                if snapshot
+                else "unknown",
                 "displayBarCount": len(effective_rows),
                 "displayLastBarTime": max(effective_rows) if effective_rows else None,
+                "recentBars": recent_bars,
+                "snapshots": [
+                    {
+                        "symbol": item["symbol"],
+                        "timeframe": item["timeframe"],
+                        "barCount": len(item["bars"]),
+                        "cutoffTime": item.get("cutoffTime"),
+                        "cutoffSource": item.get("cutoffSource", "unknown"),
+                        "source": item.get("source", "tradingview_extension"),
+                        "receivedAt": item.get("receivedAt"),
+                    }
+                    for item in self._snapshots.values()
+                ],
             }
 
     def set_subscription(self, symbol: str, timeframe: str) -> None:
@@ -275,25 +284,36 @@ class TradingViewExtensionBridge:
             self._page_url = str(payload.get("pageUrl", self._page_url))[:500]
             self._snapshots[key] = {
                 "symbol": symbol,
+                "timeframe": _normalize_timeframe(resolution),
                 "resolution": resolution,
                 "bars": dict(sorted(bars.items())[-MAX_BARS:]),
                 "receivedAt": self._last_seen,
+                "cutoffTime": None,
+                "cutoffSource": "unknown",
+                "source": str(payload.get("source", "tradingview_extension"))[:80],
             }
+            self._snapshots[key]["cutoffSource"] = str(
+                payload.get("cutoffSource", "unknown")
+            )[:40]
             try:
                 raw_cutoff = payload.get("cutoffTime")
                 cutoff = int(raw_cutoff) if raw_cutoff is not None else None
-                self._cutoff_time_ms = cutoff if cutoff and cutoff > 0 else None
+                cutoff = cutoff if cutoff and cutoff > 0 else None
+                self._snapshots[key]["cutoffTime"] = cutoff
             except (TypeError, ValueError, OverflowError):
-                self._cutoff_time_ms = None
+                self._snapshots[key]["cutoffTime"] = None
         logger.debug("Received %d TradingView bars for %s %s", len(bars), symbol, resolution)
 
-    def get_snapshot(self, symbol: str, timeframe: str, count: int) -> list[tuple[int, tuple[float, ...]]]:
+    def get_snapshot(
+        self, symbol: str, timeframe: str, count: int, *, cutoff_time_ms: int | None = None,
+        apply_capture_cutoff: bool = True,
+    ) -> list[tuple[int, tuple[float, ...]]]:
         key = (_normalize_symbol(symbol), _normalize_timeframe(timeframe))
         with self._lock:
             snapshot = self._snapshots.get(key)
             browser_symbol = self._browser_symbol
             browser_resolution = self._browser_resolution
-            cutoff_time_ms = self._cutoff_time_ms
+            capture_cutoff = snapshot.get("cutoffTime") if snapshot else None
         if snapshot is None:
             if browser_symbol:
                 detail = f"Edge 正在捕获 {browser_symbol} {browser_resolution}"
@@ -301,8 +321,20 @@ class TradingViewExtensionBridge:
                 detail = "等待 Edge 扩展连接 TradingView 图表"
             raise RuntimeError(detail)
         rows = snapshot["bars"]
-        if cutoff_time_ms is not None:
-            rows = {ts: value for ts, value in rows.items() if ts <= cutoff_time_ms}
+        effective_cutoff = cutoff_time_ms
+        if effective_cutoff is None and apply_capture_cutoff:
+            effective_cutoff = capture_cutoff
+        if effective_cutoff is not None:
+            rows = {ts: value for ts, value in rows.items() if ts <= effective_cutoff}
             if not rows:
-                raise RuntimeError("所选历史截止时间之前没有已捕获的 K 线；请先在 TradingView 加载该历史区间")
+                raise RuntimeError(
+                    "所选历史截止时间之前没有已捕获的 K 线；"
+                    "请先在 TradingView 加载该历史区间"
+                )
         return list(rows.items())[-max(1, int(count)):][::-1]
+
+    def snapshot_cutoff(self, symbol: str, timeframe: str) -> int | None:
+        key = (_normalize_symbol(symbol), _normalize_timeframe(timeframe))
+        with self._lock:
+            snapshot = self._snapshots.get(key)
+            return snapshot.get("cutoffTime") if snapshot else None

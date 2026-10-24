@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PA Agent · TradingView Chart Reader",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read and validate candles from an open TradingView chart and send them to the local PA Agent.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl65tg1AQCcAA6zXuVyvH8cHPWGw83Lqp4uJx7iZ/6Lx2H2F5RZmKMXW0sU1NjRWnCazvRGxxKA2cbyQ+KCL//6dqmy+i+fqo9YClDS1JxQwZpMNoQH/BQb545tlmBocQ3c8M4yDEECho2cdkSaxWFiItttemFpAMrrgmiMDs3H78owT/YbUHOUPzOsq6swXN1tlfk2hkln2dVGIFPQXBSTPz4w+R7kQiQ4D5at50ZT1plVVWPchjxNyinnoXNw+52c7BZt29y3ndJyK8xDUqGnCDdb2vII06cF6/6XKoOFb5fbhzuWgISdMMD+6RUp3ikUtHN/qeF2t7BGTapqYg7QIDAQAB",
   "permissions": ["storage", "alarms", "activeTab"],

@@ -34,6 +34,32 @@ class PromptSettings(BaseModel):
     stage1_inject_pattern_briefs: bool = True
 
 
+class MarketSessionSettings(BaseModel):
+    """Per-symbol trading-session override for context candle alignment."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    timezone: str = ""
+    anchor: str = ""
+
+
+class ContextSettings(BaseModel):
+    """Higher-timeframe context collection and alignment settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    #: Explicit list, e.g. ["15m", "1h"]. Empty = neutral automatic ladder.
+    timeframes: list[str] = Field(default_factory=list)
+    #: Optional per-execution-timeframe overrides. "*" applies to all.
+    timeframes_by_primary: dict[str, list[str]] = Field(default_factory=dict)
+    #: Blank = infer timezone/anchor from the symbol.
+    session_timezone: str = ""
+    session_anchor: str = ""
+    #: Exact symbol overrides, e.g. {"MES!": {"timezone": "America/Chicago", "anchor": "17:00"}}.
+    session_by_symbol: dict[str, MarketSessionSettings] = Field(default_factory=dict)
+
+
 class ValidationSettings(BaseModel):
     """Post-LLM validation behaviour."""
     model_config = ConfigDict(extra="ignore")
@@ -160,6 +186,7 @@ class Settings(BaseModel):
 
     provider: AIProviderSettings = Field(default_factory=AIProviderSettings)
     general: GeneralSettings = Field(default_factory=GeneralSettings)
+    context: ContextSettings = Field(default_factory=ContextSettings)
     prompt: PromptSettings = Field(default_factory=PromptSettings)
     validation: ValidationSettings = Field(default_factory=ValidationSettings)
     feishu: FeishuSettings = Field(default_factory=FeishuSettings)

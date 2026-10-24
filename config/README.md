@@ -26,7 +26,7 @@
 
 ## `settings.json` 字段说明
 
-配置分为四个顶层组：`provider`、`general`、`prompt`、`validation`。
+配置分为五个顶层组：`provider`、`general`、`context`、`prompt`、`validation`。
 
 ### provider — AI 提供商
 
@@ -71,6 +71,19 @@
 | `prompt.experience_max_entries` | int | `3` | 经验库最大加载条目数（0–10） |
 | `prompt.experience_max_chars_per_entry` | int | `400` | 每条经验最大字符数（100–4000） |
 | `prompt.stage1_inject_pattern_briefs` | bool | `true` | 阶段一是否注入模式判定表和速查 brief（减少 missed tags） |
+
+### context — 交易周期与高周期上下文
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `context.enabled` | bool | `true` | 是否向 AI 提供高周期结构特征；GUI 主图不受影响 |
+| `context.timeframes` | array[string] | `[]` | 上下文周期，如 `["15m", "1h"]`。留空时按常见周期阶梯自动选择 |
+| `context.timeframes_by_primary` | object | `{}` | 按主交易周期覆盖，如 `{"5m": ["15m", "1h"], "15m": ["1h", "4h"]}` |
+| `context.session_timezone` | string | `""` | 交易时段 IANA 时区；留空按品种推断 |
+| `context.session_anchor` | string | `""` | 交易时段锚点 `HH:MM`；留空按品种推断 |
+| `context.session_by_symbol` | object | `{}` | 精确品种覆盖，如 `{"MES!": {"timezone": "America/Chicago", "anchor": "17:00"}}` |
+
+高周期当前 K 线始终由主交易周期滚动聚合，扩展预采集的原生高周期快照只用于补足更早历史。所有上下文都会按主图同一个回放截止时间过滤。
 
 ### validation — 校验与重试
 

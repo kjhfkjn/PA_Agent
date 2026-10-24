@@ -5,6 +5,18 @@ let latest = { diagnostics: {}, symbol: "", resolution: "", receivedAt: 0, error
 let enabled = false;
 const lastObservedBarByChart = new Map();
 
+const restoreCaptureState = () => {
+  chrome.storage.local.get(["enabled"], (values) => {
+    enabled = !!values.enabled;
+    if (enabled) {
+      chrome.alarms.create(ALARM, { periodInMinutes: 0.5 });
+      capture().catch((error) => { latest.error = error.message; });
+    } else {
+      chrome.alarms.clear(ALARM);
+    }
+  });
+};
+
 const sendBridge = async (path, payload) => {
   if (!bridgeToken) {
     const response = await fetch(`${BRIDGE}/api/v1/status`, { cache: "no-store" });
@@ -51,9 +63,10 @@ const sendReceivedSnapshot = async (tab, received, explicitHistoryCutoff) => {
   const autoCutoff = stored.autoCutoff !== false;
   const manualCutoff = explicitHistoryCutoff === undefined ? stored.historyCutoff : explicitHistoryCutoff;
   const newest = received.bars.reduce((best, bar) => Number(bar?.time) > Number(best?.time) ? bar : best, null);
+  const observedCutoff = Number(received.cutoffTimeCandidate);
   let cutoffTime = null;
-  if (autoCutoff && newest) {
-    cutoffTime = Number(newest.time);
+  if (autoCutoff && (Number.isFinite(observedCutoff) || newest)) {
+    cutoffTime = Number.isFinite(observedCutoff) ? observedCutoff : Number(newest.time);
     if (cutoffTime < 100000000000) cutoffTime *= 1000;
   } else if (manualCutoff) {
     cutoffTime = new Date(manualCutoff).getTime();
@@ -62,7 +75,9 @@ const sendReceivedSnapshot = async (tab, received, explicitHistoryCutoff) => {
     throw new Error("历史截止时间无效，请重新选择日期和时间");
   }
   const symbolFilter = String(stored.symbolFilter ?? "MES!").toUpperCase();
-  const timeframeFilter = String(stored.timeframeFilter ?? "5");
+  // Capturing all chart resolutions lets users preload higher-timeframe
+  // context, then trade from one execution timeframe without switching back.
+  const timeframeFilter = String(stored.timeframeFilter ?? "*");
   const symbol = String(received.symbol || "").toUpperCase().split(":").pop().replace("1!", "!");
   if (symbolFilter !== "*" && symbol !== symbolFilter) {
     throw new Error(`当前图表 ${symbol} 不符合品种过滤 ${symbolFilter}`);
@@ -75,8 +90,10 @@ const sendReceivedSnapshot = async (tab, received, explicitHistoryCutoff) => {
     pageUrl: tab.url,
     symbol: received.symbol,
     resolution: received.resolution,
+    source: "tradingview_edge_extension",
     bars: received.bars,
     cutoffTime,
+    cutoffSource: received.cutoffSource || "unknown",
     diagnostics: received.diagnostics
   });
   latest = { ...latest, cutoffTime, cutoffMode: autoCutoff ? "auto" : (manualCutoff ? "manual" : "latest") };
@@ -134,11 +151,14 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     const newest = rows.reduce((best, bar) => Number(bar?.time) > Number(best?.time) ? bar : best, null);
     if (!newest || !sender.tab?.id) return;
     const key = `${sender.tab.id}|${message.payload.symbol}|${message.payload.resolution}`;
-    const currentTime = Number(newest.time);
+    const activeCutoff = Number(message.payload?.cutoffTimeCandidate);
+    const currentTime = Number.isFinite(activeCutoff) && activeCutoff > 0
+      ? activeCutoff
+      : Number(newest.time);
     const previousTime = lastObservedBarByChart.get(key);
     lastObservedBarByChart.set(key, currentTime);
-    // A new bar timestamp means TradingView has advanced past the previous
-    // candle close. Push immediately; the alarm remains a recovery/update path.
+    // The active series edge moves both forward and backward in Bar Replay.
+    // Push either transition immediately; the alarm remains a recovery path.
     if (previousTime !== currentTime) {
       chrome.storage.local.get(["enabled"], (values) => {
         enabled = !!values.enabled;
@@ -153,13 +173,12 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) capture().catch((error) => { latest.error = error.message; });
 });
-chrome.runtime.onStartup.addListener(() => chrome.storage.local.get(["enabled"], (values) => {
-  enabled = !!values.enabled;
-  if (enabled) chrome.alarms.create(ALARM, { periodInMinutes: 0.5 });
-}));
+chrome.runtime.onStartup.addListener(restoreCaptureState);
 chrome.runtime.onInstalled.addListener(() => chrome.storage.local.get(["enabled"], (values) => {
   enabled = !!values.enabled;
   chrome.storage.local.get(["autoCutoff"], (stored) => {
     if (stored.autoCutoff === undefined) chrome.storage.local.set({ autoCutoff: true });
   });
+  restoreCaptureState();
 }));
+restoreCaptureState();

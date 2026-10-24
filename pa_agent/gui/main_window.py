@@ -1359,6 +1359,10 @@ class MainWindow(QMainWindow):
             timeframe = self._tf_combo.currentText()
 
             new_source = create_data_source(kind)
+            settings = getattr(self._ctx, "settings", None)
+            configure_context = getattr(new_source, "configure_context", None)
+            if callable(configure_context) and settings is not None:
+                configure_context(settings.context)
             # Wire auto-probe status callback for TV
             from pa_agent.data.tradingview import TradingViewSource
             if isinstance(new_source, TradingViewSource):
@@ -4307,6 +4311,13 @@ class MainWindow(QMainWindow):
             self._ctx.settings = settings
             self._ai_sidebar.bind_settings(settings)
             self._apply_chart_display_settings()
+            configure_context = getattr(
+                getattr(self._ctx, "data_source", None),
+                "configure_context",
+                None,
+            )
+            if callable(configure_context):
+                configure_context(settings.context)
 
     def _apply_chart_display_settings(self) -> None:
         """Sync chart label font sizes and decision-flow zoom from persisted settings."""

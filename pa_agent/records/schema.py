@@ -41,6 +41,7 @@ class AnalysisRecord(BaseModel):
     experience_loaded: list[dict]
     exception: Optional[dict]           # If error occurred: category + debug info
     usage_total: dict                   # Cumulative usage for audit
+    external_features: list[dict] = []  # Higher-timeframe context snapshots sent to AI
 
 
 class FollowupTurn(BaseModel):

@@ -76,6 +76,9 @@ class AppContext:
             getattr(settings.general, "last_data_source", "mt5")
         )
         data_source = create_data_source(ds_kind)
+        configure_context = getattr(data_source, "configure_context", None)
+        if callable(configure_context):
+            configure_context(settings.context)
 
         # Subscribe to the last-used symbol/timeframe from settings
         try:

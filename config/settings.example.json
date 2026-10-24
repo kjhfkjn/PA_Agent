@@ -26,6 +26,14 @@
     "auto_resume_chart_after_analysis": true,
     "enable_next_bar_prediction": false
   },
+  "context": {
+    "enabled": true,
+    "timeframes": [],
+    "timeframes_by_primary": {},
+    "session_timezone": "",
+    "session_anchor": "",
+    "session_by_symbol": {}
+  },
   "prompt": {
     "stage2_load_full_strategy_library": false,
     "experience_max_entries": 0,

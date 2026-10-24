@@ -1054,16 +1054,35 @@ class PromptAssembler:
         features = getattr(frame, "external_features", ()) or ()
         if not features:
             return ""
-        blocks = ["## 外部数据源特征（来源与周期必须一并考虑）"]
+        blocks = [
+            "## 高周期上下文特征（主交易周期 K 线仍以本消息 K 线表为准）",
+            f"主交易周期：{frame.timeframe}。下列内容只作结构背景，不替换主交易周期 K 线。",
+        ]
         for feature in features:
             if not isinstance(feature, dict):
                 continue
+            available = bool(feature.get("available", True))
+            as_of = feature.get("as_of_ms")
+            if isinstance(as_of, (int, float)) and as_of > 0:
+                as_of_text = f"{format_epoch_for_display(as_of)} UTC ({int(as_of)} ms)"
+            else:
+                as_of_text = "未提供"
+            data = feature.get("data", {})
+            reason = data.get("reason") if isinstance(data, dict) else None
+            status = "可用" if available else "不可用"
             blocks.extend([
-                f"### {feature.get('feature_type', 'feature')} | {feature.get('timeframe', 'unknown')}",
+                f"### [{status}] {feature.get('feature_type', 'feature')} | "
+                f"{feature.get('timeframe', 'unknown')}",
                 *([f"说明：{feature['description']}"] if feature.get("description") else []),
-                f"来源：{feature.get('source', 'unknown')}；品种：{feature.get('symbol', frame.symbol)}",
-                f"时间口径：{feature.get('provenance', '未提供')}；截至：{feature.get('as_of_ms', 'unknown')}",
-                "数据：" + json.dumps(feature.get("data", {}), ensure_ascii=False, separators=(",", ":")),
+                f"特征周期：{feature.get('timeframe', 'unknown')}；"
+                f"主交易周期：{feature.get('primary_timeframe', frame.timeframe)}；"
+                f"品种：{feature.get('symbol', frame.symbol)}",
+                f"来源：{feature.get('source', 'unknown')}；截至：{as_of_text}",
+                f"计算方法：{feature.get('method', '未提供')}；"
+                f"计算所用 K 线：{feature.get('bars_used', 0)} 根",
+                *([f"不可用原因：{reason}"] if not available and reason else []),
+                f"时间口径：{feature.get('provenance', '未提供')}",
+                "特征数据：" + json.dumps(data, ensure_ascii=False, separators=(",", ":")),
             ])
         return "\n".join(blocks) if len(blocks) > 1 else ""
 

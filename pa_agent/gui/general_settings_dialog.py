@@ -88,6 +88,43 @@ class GeneralSettingsDialog(QDialog):
 
         form_layout.addWidget(trade_group)
 
+        # ── 多周期上下文 ──────────────────────────────────────────────────────
+        context_group = QGroupBox("多周期上下文")
+        context_form = QFormLayout(context_group)
+
+        self._context_enabled_check = QCheckBox(
+            "向分析提供高周期结构特征（主图仍只显示交易周期）"
+        )
+        self._context_enabled_check.setToolTip(
+            "高周期 K 线由交易周期滚动聚合，并使用扩展预采集的原生高周期历史补足背景。"
+        )
+        context_form.addRow("高周期上下文:", self._context_enabled_check)
+
+        self._context_timeframes_edit = QLineEdit()
+        self._context_timeframes_edit.setPlaceholderText("留空自动；例如 15m,1h,4h")
+        self._context_timeframes_edit.setToolTip(
+            "逗号分隔。只会采用高于交易周期且可整除主周期的周期。\n"
+            "留空时按标准周期阶梯自动选择。"
+        )
+        context_form.addRow("上下文周期:", self._context_timeframes_edit)
+
+        self._context_timezone_edit = QLineEdit()
+        self._context_timezone_edit.setPlaceholderText("留空按品种推断，例如 America/Chicago")
+        self._context_timezone_edit.setToolTip(
+            "用于确定高周期 K 线的交易时段边界。留空时根据品种推断。"
+        )
+        context_form.addRow("交易时段时区:", self._context_timezone_edit)
+
+        self._context_anchor_edit = QLineEdit()
+        self._context_anchor_edit.setPlaceholderText("留空按品种推断，例如 17:00")
+        self._context_anchor_edit.setToolTip(
+            "交易时段锚点使用 HH:MM。CME 期货通常为 America/Chicago 17:00；"
+            "美股通常为 America/New_York 09:30。"
+        )
+        context_form.addRow("交易时段锚点:", self._context_anchor_edit)
+
+        form_layout.addWidget(context_group)
+
         # ── 分析行为 ──────────────────────────────────────────────────────────
         analysis_group = QGroupBox("分析行为")
         analysis_form = QFormLayout(analysis_group)
@@ -231,6 +268,11 @@ class GeneralSettingsDialog(QDialog):
         )
         self._last_symbol_edit.setText(g.last_symbol)
         self._last_timeframe_edit.setText(g.last_timeframe)
+        context = self._settings.context
+        self._context_enabled_check.setChecked(bool(context.enabled))
+        self._context_timeframes_edit.setText(",".join(context.timeframes))
+        self._context_timezone_edit.setText(context.session_timezone)
+        self._context_anchor_edit.setText(context.session_anchor)
 
         self._refresh_interval_spin.setValue(g.refresh_interval_ms)
         self._auto_resume_chart_check.setChecked(
@@ -263,6 +305,34 @@ class GeneralSettingsDialog(QDialog):
         g.cancel_keep_analysis_on_retry = self._cancel_keep_on_retry_check.isChecked()
         g.last_symbol = self._last_symbol_edit.text().strip()
         g.last_timeframe = self._last_timeframe_edit.text().strip()
+
+        context = self._settings.context
+        context.enabled = self._context_enabled_check.isChecked()
+        context.timeframes = [
+            value
+            for value in (
+                part.strip() for part in self._context_timeframes_edit.text().split(",")
+            )
+            if value
+        ]
+        context.session_timezone = self._context_timezone_edit.text().strip()
+        context.session_anchor = self._context_anchor_edit.text().strip()
+        if context.session_timezone or context.session_anchor:
+            from pa_agent.data.context_timeframes import (
+                MarketSession,
+                validate_market_session,
+            )
+
+            try:
+                validate_market_session(
+                    MarketSession(
+                        timezone=context.session_timezone or "UTC",
+                        anchor=context.session_anchor or "00:00",
+                    )
+                )
+            except ValueError as exc:
+                QMessageBox.warning(self, "交易时段设置无效", str(exc))
+                return
 
         g.refresh_interval_ms = self._refresh_interval_spin.value()
         g.auto_resume_chart_after_analysis = self._auto_resume_chart_check.isChecked()

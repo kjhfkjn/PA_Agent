@@ -27,6 +27,8 @@ def test_defaults(tmp_path):
     assert s.general.decision_stance == "balanced"
     assert s.general.decision_flow_auto_play is True
     assert s.general.auto_resume_chart_after_analysis is False
+    assert s.context.enabled is True
+    assert s.context.timeframes == []
     assert p.exists(), "defaults should be written to disk"
 
 
@@ -108,6 +110,23 @@ def test_tushare_round_trip(tmp_path):
     save_settings(original, p)
     loaded = load_settings(p)
     assert loaded.tushare.token == "ts-test-token"
+
+
+def test_context_settings_round_trip(tmp_path):
+    """Multi-timeframe and session configuration survives save/load."""
+    p = tmp_path / "settings.json"
+    original = Settings()
+    original.context.timeframes = ["15m", "1h"]
+    original.context.timeframes_by_primary = {"5m": ["30m", "2h"]}
+    original.context.session_timezone = "America/Chicago"
+    original.context.session_anchor = "17:00"
+    save_settings(original, p)
+
+    loaded = load_settings(p)
+    assert loaded.context.timeframes == ["15m", "1h"]
+    assert loaded.context.timeframes_by_primary == {"5m": ["30m", "2h"]}
+    assert loaded.context.session_timezone == "America/Chicago"
+    assert loaded.context.session_anchor == "17:00"
 
 
 def test_pushplus_auto_disabled_when_enabled_without_token(tmp_path):

@@ -3,8 +3,16 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Any
 
 from pa_agent.data.base import DataSourceTransientError, KlineBar
+from pa_agent.data.context_timeframes import (
+    MarketSession,
+    normalize_timeframe,
+    resolve_context_timeframes,
+    resolve_market_session,
+    timeframe_to_minutes,
+)
 from pa_agent.data.tradingview import TradingViewSource
 from pa_agent.data.tradingview_extension_bridge import TradingViewExtensionBridge
 
@@ -22,6 +30,7 @@ class TradingViewExtensionSource(TradingViewSource):
         super().__init__()
         self._bridge = TradingViewExtensionBridge()
         self._connected = False
+        self._context_settings: Any = None
 
     def connect(self) -> None:
         try:
@@ -39,8 +48,12 @@ class TradingViewExtensionSource(TradingViewSource):
         if timeframe not in self.supported_timeframes():
             raise ValueError(f"Unsupported timeframe: {timeframe!r}")
         self._symbol = symbol.strip()
-        self._timeframe = timeframe
+        self._timeframe = normalize_timeframe(timeframe)
         self._bridge.set_subscription(self._symbol, self._timeframe)
+
+    def configure_context(self, settings: Any) -> None:
+        """Attach the persisted multi-timeframe context settings."""
+        self._context_settings = settings
 
     def unsubscribe(self) -> None:
         self._symbol = ""
@@ -84,18 +97,74 @@ class TradingViewExtensionSource(TradingViewSource):
         return bars
 
     def analysis_features(self) -> tuple[dict, ...]:
-        """Get extensible context from the full captured (cutoff-aware) history."""
+        """Get cutoff-aware higher-timeframe features for the execution chart."""
         if not self._connected or not self._symbol or not self._timeframe:
             return ()
-        from pa_agent.data.tradingview_features import build_tradingview_features
+        from pa_agent.data.tradingview_features import (
+            build_tradingview_features,
+            build_unavailable_context_features,
+        )
 
         try:
             rows = self._bridge.get_snapshot(self._symbol, self._timeframe, 10_000)
         except RuntimeError:
             return ()
-        return build_tradingview_features(
-            rows, symbol=self._symbol, source_timeframe=self._timeframe
+        if not rows:
+            return ()
+        enabled = getattr(self._context_settings, "enabled", True)
+        if not enabled:
+            return ()
+        configured = getattr(self._context_settings, "timeframes", [])
+        by_primary = getattr(self._context_settings, "timeframes_by_primary", {})
+        context_timeframes = resolve_context_timeframes(
+            self._timeframe,
+            configured,
+            by_primary,
         )
+        if not context_timeframes:
+            return ()
+        # Use the execution chart's replay cutoff for every timeframe. Native
+        # context snapshots captured later must never leak future candles into
+        # a historical analysis.
+        cutoff = self._bridge.snapshot_cutoff(self._symbol, self._timeframe)
+        if cutoff is None:
+            cutoff = max(int(timestamp) for timestamp, _ in rows)
+        try:
+            session: MarketSession = resolve_market_session(
+                self._symbol,
+                self._context_settings,
+            )
+        except ValueError as exc:
+            logger.warning("TradingView context session invalid: %s", exc)
+            return build_unavailable_context_features(
+                symbol=self._symbol,
+                source_timeframe=self._timeframe,
+                context_timeframes=context_timeframes,
+                cutoff_time_ms=cutoff,
+                reason=str(exc),
+            )
+        native: dict[str, list[tuple[int, tuple[float, ...]]]] = {}
+        for target_timeframe in context_timeframes:
+            try:
+                native[target_timeframe] = self._bridge.get_snapshot(
+                    self._symbol,
+                    target_timeframe,
+                    10_000,
+                    cutoff_time_ms=cutoff,
+                )
+            except RuntimeError:
+                pass
+        return build_tradingview_features(
+            rows, symbol=self._symbol, source_timeframe=self._timeframe,
+            cutoff_time_ms=cutoff,
+            context_timeframes=context_timeframes,
+            native_snapshots=native,
+            session=session,
+        )
+
+    @staticmethod
+    def _timeframe_minutes(timeframe: str) -> int | None:
+        return timeframe_to_minutes(timeframe)
 
     @property
     def bridge_status(self) -> dict[str, object]:

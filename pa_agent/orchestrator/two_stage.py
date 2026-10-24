@@ -265,6 +265,7 @@ def _build_empty_record(
     return AnalysisRecord(
         meta=meta,
         kline_data=kline_data,
+        external_features=list(getattr(frame, "external_features", ()) or ()),
         htf_text="",
         stage1_messages=[],
         stage1_response=None,

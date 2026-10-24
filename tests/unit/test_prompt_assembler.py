@@ -115,6 +115,55 @@ def test_stage1_user_prompt_contains_required_fields(assembler: PromptAssembler)
     assert "更高时间框架" not in user
 
 
+def test_stage1_prompt_separates_primary_kline_from_context_features(
+    assembler: PromptAssembler,
+) -> None:
+    from dataclasses import replace
+
+    frame = replace(
+        _make_frame(),
+        external_features=(
+            {
+                "source": "tradingview_extension",
+                "feature_type": "key_support_resistance",
+                "symbol": "XAUUSD",
+                "timeframe": "4h",
+                "primary_timeframe": "1h",
+                "as_of_ms": 1_700_000_000_000,
+                "method": "session_aligned_ohlcv_aggregation",
+                "bars_used": 42,
+                "available": True,
+                "description": "4h context",
+                "provenance": "primary rolling aggregation",
+                "data": {"supports": [{"price": 2590.0, "touches": 2}]},
+            },
+            {
+                "source": "tradingview_extension",
+                "feature_type": "key_support_resistance",
+                "symbol": "XAUUSD",
+                "timeframe": "1d",
+                "primary_timeframe": "1h",
+                "as_of_ms": 1_700_000_000_000,
+                "method": "session_aligned_ohlcv_aggregation",
+                "bars_used": 2,
+                "available": False,
+                "description": "1d context",
+                "provenance": "primary rolling aggregation",
+                "data": {"reason": "历史不足"},
+            },
+        ),
+    )
+    user = assembler.build_stage1(frame)[1]["content"]
+
+    assert "主交易周期：1h" in user
+    assert "### [可用] key_support_resistance | 4h" in user
+    assert "### [不可用] key_support_resistance | 1d" in user
+    assert "来源：tradingview_extension" in user
+    assert "计算所用 K 线：42 根" in user
+    assert "截至：2023-11-14 22:13:20 UTC" in user
+    assert "不可用原因：历史不足" in user
+
+
 def test_stage2_user_prompt_includes_gate_trace(assembler: PromptAssembler):
     frame = _make_frame()
     stage1_json = {

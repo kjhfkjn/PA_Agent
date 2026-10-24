@@ -34,6 +34,7 @@ const paint = (state) => {
   } else {
     el("effectiveBar").textContent = state.bridge?.historyCutoff ? "截止点前无 K 线" : "未设置历史截止时间";
   }
+  el("cutoffSource").textContent = data.cutoffSource || state.bridge?.historyCutoffSource || "—";
   const ok = !!state.bridge?.ok;
   el("backendStatus").textContent = ok ? "已连接" : state.bridgeError ? "连接失败" : "未连接";
   el("statusDot").className = `dot ${ok ? "ok" : "bad"}`;

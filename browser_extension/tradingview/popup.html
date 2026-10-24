@@ -18,6 +18,7 @@
       <div class="row"><span>当前图表</span><strong id="chartStatus">检测中</strong></div>
       <div class="row"><span>目标品种 / 周期</span><strong id="target">MES! · 5m</strong></div>
       <div class="row"><span>PA Agent 实际末根 K 线</span><strong id="effectiveBar">等待数据</strong></div>
+      <div class="row"><span>截止时间来源</span><strong id="cutoffSource">—</strong></div>
     </section>
     <section class="capture">
       <div><h2>图表采集</h2><p id="captureHint">解析图表数据包，过滤并同步有效 K 线</p></div>
@@ -32,7 +33,7 @@
     </section>
     <section class="card controls">
       <label>品种过滤<input id="symbolFilter" value="MES!" placeholder="例如 MES! 或 *"></label>
-      <label>周期过滤<select id="timeframeFilter"><option value="*">全部周期</option><option value="1">1 分钟</option><option value="3">3 分钟</option><option value="5" selected>5 分钟</option><option value="15">15 分钟</option><option value="30">30 分钟</option><option value="45">45 分钟</option><option value="60">1 小时</option><option value="120">2 小时</option><option value="180">3 小时</option><option value="240">4 小时</option><option value="D">日线</option><option value="W">周线</option><option value="M">月线</option></select></label>
+      <label>周期过滤<select id="timeframeFilter"><option value="*" selected>全部周期</option><option value="1">1 分钟</option><option value="3">3 分钟</option><option value="5">5 分钟</option><option value="15">15 分钟</option><option value="30">30 分钟</option><option value="45">45 分钟</option><option value="60">1 小时</option><option value="120">2 小时</option><option value="180">3 小时</option><option value="240">4 小时</option><option value="D">日线</option><option value="W">周线</option><option value="M">月线</option></select></label>
       <label class="auto-cutoff"><input id="autoCutoff" type="checkbox" checked><span>自动获取截止时间</span></label>
       <label>历史数据截止时间<input id="historyCutoff" type="datetime-local" step="60"><small id="cutoffHint">自动读取图表最新 K 线时间；关闭自动后可手动指定</small></label>
       <button id="captureNow" class="primary">立即读取并同步</button>
