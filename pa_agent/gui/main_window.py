@@ -4197,6 +4197,19 @@ class MainWindow(QMainWindow):
     def _on_startup_tv_connectivity_check(self) -> None:
         if self._current_data_source_kind() != "tradingview":
             return
+        # The Edge extension pushes chart candles into the local bridge; it
+        # does not need tvDatafeed's network probe. Start the normal GUI
+        # refresh loop so already captured replay bars are rendered on launch
+        # and newly synchronized bars appear without an extra button click.
+        from pa_agent.data.tradingview_extension_source import (
+            TradingViewExtensionSource,
+        )
+
+        if isinstance(
+            getattr(self._ctx, "data_source", None), TradingViewExtensionSource
+        ):
+            self._start_refresh_loop()
+            return
         self._ensure_tradingview_reachable()
 
     def _on_startup_api_key_check(self) -> None:
