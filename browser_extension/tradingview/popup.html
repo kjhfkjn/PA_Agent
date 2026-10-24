@@ -24,12 +24,25 @@
       <div><h2>图表采集</h2><p id="captureHint">解析图表数据包，过滤并同步有效 K 线</p></div>
       <label class="switch"><input id="enabled" type="checkbox"><span></span></label>
     </section>
+    <section class="capture backtest">
+      <div><h2>5 分钟回测</h2><p>Agent 完成当前 K 线分析后，扩展自动推进并同步下一根</p></div>
+      <label class="switch"><input id="backtestMode" type="checkbox"><span></span></label>
+    </section>
     <section class="metrics">
       <div class="metric"><span>有效 K 线</span><strong id="barCount">—</strong></div>
       <div class="metric"><span>最近更新</span><strong id="lastUpdate">—</strong></div>
       <div class="metric"><span>剔除无效</span><strong id="rejected">—</strong></div>
       <div class="metric"><span>去重更新</span><strong id="duplicates">—</strong></div>
       <div class="metric"><span>解析图表数据包</span><strong id="packetCount">—</strong></div>
+    </section>
+    <section class="card live-analysis">
+      <div class="live-heading"><h2>PA Agent 实时分析</h2><span id="liveStatus">等待 Agent</span></div>
+      <p id="liveInstrument" class="live-meta">思考、回答与决策由 PA Agent 实时推送；关闭侧栏后内容不保留。</p>
+      <div class="live-block"><h3>阶段一 · 思考</h3><pre id="stage1Thinking">等待 Agent 输出…</pre></div>
+      <div class="live-block"><h3>阶段一 · 回答</h3><pre id="stage1Answer">等待 Agent 输出…</pre></div>
+      <div class="live-block"><h3>阶段二 · 思考</h3><pre id="stage2Thinking">等待 Agent 输出…</pre></div>
+      <div class="live-block"><h3>阶段二 · 回答</h3><pre id="stage2Answer">等待 Agent 输出…</pre></div>
+      <div class="live-block decision-result"><h3>决策结果</h3><pre id="decisionResult">等待 Agent 决策…</pre></div>
     </section>
     <section class="card controls">
       <label>品种过滤<input id="symbolFilter" value="MES!" placeholder="例如 MES! 或 *"></label>

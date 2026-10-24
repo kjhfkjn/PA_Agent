@@ -13,8 +13,8 @@ class AIProviderSettings(BaseModel):
     """AI provider connection and behaviour settings."""
     model_config = ConfigDict(extra="ignore")
 
-    model: str = "deepseek-v4-flash"
-    base_url: str = "https://api.deepseek.com"
+    model: str = "deepseek-v4.1-flash"
+    base_url: str = "https://opencode.ai/inference/go/openai/v1"
     api_key: str = ""
     api_key_encrypted: str = ""
     thinking: bool = True

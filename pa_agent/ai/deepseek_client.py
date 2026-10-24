@@ -1,8 +1,10 @@
 """DeepSeek AI client (OpenAI-compatible API)."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 
@@ -78,6 +80,38 @@ class CancelledError(Exception):
 
 def _is_deepseek_native(base_url: str) -> bool:
     return "deepseek.com" in (base_url or "").lower()
+
+
+def _is_opencode_go(base_url: str) -> bool:
+    """True when using OpenCode Go's OpenAI-compatible endpoint."""
+    return "opencode.ai/inference/go/" in (base_url or "").lower()
+
+
+def _opencode_go_headers(
+    base_url: str,
+    messages: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Return OpenCode Go's client identity and stable conversation header."""
+    if not _is_opencode_go(base_url):
+        return {}
+
+    # Use the first user turn as a stable conversation seed. Retries and
+    # follow-up turns keep this ID, while prompt text itself is never sent in
+    # the header or logs. UUID formatting matches common session-ID formats.
+    first_user_turn = next(
+        (
+            message.get("content")
+            for message in messages
+            if message.get("role") == "user"
+        ),
+        "",
+    )
+    seed = hashlib.sha256(str(first_user_turn).encode("utf-8")).hexdigest()
+    session_id = uuid.uuid5(uuid.NAMESPACE_URL, f"pa-agent:{seed}")
+    return {
+        "User-Agent": "pa-agent/0.1.0",
+        "x-opencode-session": str(session_id),
+    }
 
 
 def _is_deepseek_model(model: str) -> bool:
@@ -555,6 +589,11 @@ class DeepSeekClient:
             "base_url": self._settings.base_url,
             "api_key": self._settings.api_key,
         }
+        go_headers = _opencode_go_headers(
+            self._settings.base_url, api_messages
+        )
+        if go_headers:
+            _openai_kwargs["default_headers"] = go_headers
         # SenseNova free-fallback path: fail fast on 429/transient SDK retries
         # so the orchestrator can rotate free candidates without long waits.
         _sensenova_fast_fail = is_sensenova_fallback_eligible(self._settings.base_url)
@@ -751,6 +790,11 @@ class DeepSeekClient:
             "base_url": self._settings.base_url,
             "api_key": self._settings.api_key,
         }
+        go_headers = _opencode_go_headers(
+            self._settings.base_url, api_messages
+        )
+        if go_headers:
+            _openai_kwargs["default_headers"] = go_headers
         _sensenova_fast_fail = is_sensenova_fallback_eligible(self._settings.base_url)
         if _sensenova_fast_fail:
             _openai_kwargs["max_retries"] = 0

@@ -21,6 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     app = QApplication(argv)
     app.setApplicationName("PA Agent")
+    app.setQuitOnLastWindowClosed(True)
 
     from pa_agent.gui.theme import apply_theme
     apply_theme(app)
@@ -38,13 +39,24 @@ def main(argv: list[str] | None = None) -> int:
         from pa_agent.util.crash_diagnostics import log_startup_diagnostics
         log_startup_diagnostics()
 
-    # Build and show the main window
-    from pa_agent.gui.main_window import MainWindow
-    window = MainWindow(ctx)
-    window.show()
+    # Build and show the main window. Both window close and application-level
+    # quit paths run the same idempotent cleanup.
+    window = None
+    try:
+        from pa_agent.gui.main_window import MainWindow
 
-    logger.info("Main window shown")
-    return app.exec()
+        window = MainWindow(ctx)
+        app.aboutToQuit.connect(window.shutdown)
+        app.lastWindowClosed.connect(app.quit)
+        window.show()
+
+        logger.info("Main window shown")
+        return app.exec()
+    finally:
+        if window is not None:
+            window.shutdown()
+        else:
+            ctx.shutdown()
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,7 +1,7 @@
 {
   "provider": {
-    "model": "deepseek-chat",
-    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-v4.1-flash",
+    "base_url": "https://opencode.ai/inference/go/openai/v1",
     "api_key_encrypted": "",
     "thinking": true,
     "reasoning_effort": "high",

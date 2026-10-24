@@ -13,6 +13,7 @@ class AppContext:
     settings: Any = None
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("pa_agent"))
     event_bus: Any = None
+    _shutdown_done: bool = field(default=False, init=False, repr=False)
 
     # Data layer
     data_source: Any = None       # DataSource implementation
@@ -25,6 +26,24 @@ class AppContext:
     pending_writer: Any = None    # PendingWriter
     exp_reader: Any = None        # ExperienceReader
     ledger: Any = None            # SessionTokenLedger
+
+    def shutdown(self) -> None:
+        """Release app-owned resources once, regardless of the quit path."""
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+
+        data_source = self.data_source
+        if data_source is None:
+            return
+        for method_name in ("unsubscribe", "disconnect"):
+            method = getattr(data_source, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                method()
+            except Exception as exc:  # noqa: BLE001
+                self.logger.debug("%s failed during shutdown: %s", method_name, exc)
 
     @classmethod
     def bootstrap(cls) -> "AppContext":

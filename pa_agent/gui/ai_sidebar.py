@@ -9,6 +9,7 @@ from pa_agent.gui.ai_stream_window import AIStreamPanel
 from pa_agent.gui.debug_widget import DebugWidget
 from pa_agent.gui.decision_panel import DecisionPanel
 from pa_agent.gui.decision_flow_viz import DecisionFlowVizPanel
+from pa_agent.gui.decision_history_panel import DecisionHistoryPanel
 from pa_agent.gui.decision_tree_panel import DecisionTreePanel
 from pa_agent.gui.future_trend_panel import FutureTrendPanel
 from pa_agent.gui.prompt_files_panel import PromptFilesPanel
@@ -35,11 +36,13 @@ class AISidebar(QWidget):
         self.decision = DecisionPanel()
         self.decision_tree = DecisionTreePanel()
         self.decision_flow_viz = DecisionFlowVizPanel()
+        self.decision_history = DecisionHistoryPanel()
         self.future_trend = FutureTrendPanel()
 
         self._tabs.addTab(self.stream, "实时")
         self._tabs.addTab(self.decision_tree, "决策树")
         self._tabs.addTab(self.decision_flow_viz, "决策树可视化")
+        self._tabs.addTab(self.decision_history, "决策记录")
         self._tabs.addTab(self.decision, "决策")
         self._tabs.addTab(self.future_trend, "未来走势预期")
         self._tabs.addTab(self.debug, "原始")
@@ -57,10 +60,11 @@ class AISidebar(QWidget):
     TAB_STREAM = 0
     TAB_DECISION_TREE = 1
     TAB_DECISION_FLOW = 2
-    TAB_DECISION = 3
-    TAB_FUTURE_TREND = 4   # new
-    TAB_RAW = 5            # was 4
-    TAB_DEBUG = 6          # was 5
+    TAB_DECISION_HISTORY = 3
+    TAB_DECISION = 4
+    TAB_FUTURE_TREND = 5
+    TAB_RAW = 6
+    TAB_DEBUG = 7
 
     def focus_stream(self) -> None:
         """Switch to the live AI output tab (index 0)."""

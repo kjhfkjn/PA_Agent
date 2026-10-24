@@ -32,13 +32,17 @@
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `provider.model` | string | `"deepseek-v4-flash"` | 模型名称（须与网关支持的名称一致） |
-| `provider.base_url` | string | `"https://api.deepseek.com"` | OpenAI 兼容 API 根地址。DeepSeek：`https://api.deepseek.com`；MiMo：`https://api.xiaomimimo.com/v1`（程序自动处理 `enable_thinking` 与 `reasoning_content` 回放） |
+| `provider.model` | string | `"deepseek-v4.1-flash"` | 模型名称（须与网关支持的名称一致）；OpenCode Go 请填写其支持的模型 ID |
+| `provider.base_url` | string | `"https://opencode.ai/inference/go/openai/v1"` | OpenAI 兼容 API 根地址。OpenCode Go：`https://opencode.ai/inference/go/openai/v1`；DeepSeek：`https://api.deepseek.com`；MiMo：`https://api.xiaomimimo.com/v1` |
 | `provider.api_key` | string | `""` | API Key（明文，内存中临时使用；不持久化到文件） |
 | `provider.api_key_encrypted` | string | `""` | 加密后的 Key；留空表示未配置（通过 GUI 保存时自动加密写入） |
 | `provider.thinking` | bool | `true` | 是否启用思考/推理类扩展参数（依模型与网关而定）。关闭可 3–5 倍提速但分析质量下降 |
 | `provider.reasoning_effort` | string | `"high"` | 推理深度：`low` / `medium` / `high` / `max` |
 | `provider.context_window` | int | `2000000` | 用于上下文占用提示的窗口大小（tokens） |
+
+#### 使用 OpenCode Go
+
+在「设置 → AI 模型设置」中填写 OpenCode Go 的 API Key、模型 ID 和上表中的 Base URL。项目使用 OpenAI 兼容的 Chat Completions 客户端；调用时会附加 `User-Agent: pa-agent/0.1.0` 与由首条用户消息生成的稳定 `x-opencode-session`，让同一轮对话的重试复用会话标识。已有 `settings.json` 不会被默认值覆盖，需要在 GUI 中更新这些字段。
 
 ### general — 通用设置
 

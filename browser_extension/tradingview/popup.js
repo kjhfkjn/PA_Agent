@@ -4,6 +4,78 @@ const statusText = (message, bad = false) => {
   el("message").style.color = bad ? "var(--bad)" : "var(--muted)";
 };
 const request = (type, extra = {}) => new Promise((resolve) => chrome.runtime.sendMessage({ type, ...extra }, resolve));
+const livePort = chrome.runtime.connect({ name: "pa-agent-live-stream" });
+const streamFields = {
+  stage1Thinking: "stage1Thinking",
+  stage1Answer: "stage1Answer",
+  stage2Thinking: "stage2Thinking",
+  stage2Answer: "stage2Answer"
+};
+const renderDecision = (full) => {
+  const decision = full?.decision || {};
+  const lines = [];
+  const order = [decision.order_direction, decision.order_type].filter(Boolean).join(" ");
+  if (order) lines.push(`最终决策：${order}`);
+  for (const [label, key] of [["入场", "entry_price"], ["止损", "stop_loss_price"], ["止盈", "take_profit_price"]]) {
+    if (decision[key] !== undefined && decision[key] !== null && decision[key] !== "") {
+      lines.push(`${label}：${decision[key]}`);
+    }
+  }
+  if (decision.reasoning) lines.push(`理由：${decision.reasoning}`);
+  if (Array.isArray(full?.decision_trace) && full.decision_trace.length) {
+    lines.push("决策路径：");
+    for (const item of full.decision_trace) {
+      if (!item || typeof item !== "object") continue;
+      lines.push([item.node_id, item.question, item.answer].filter(Boolean).join(" "));
+    }
+  }
+  el("decisionResult").textContent = lines.join("\n") || "Agent 尚未输出决策。";
+};
+const renderLiveSnapshot = (state = {}) => {
+  for (const [id, key] of Object.entries(streamFields)) {
+    el(id).textContent = state[key] || "等待 Agent 输出…";
+  }
+  renderDecision(state.decision);
+  el("liveStatus").textContent = state.error
+    ? `${state.status || "分析失败"}：${state.error}`
+    : (state.status || "等待 Agent");
+  el("liveInstrument").textContent = state.symbol
+    ? `${state.symbol} · ${state.timeframe || "?"} · 来自 PA Agent 实时推送`
+    : "思考、回答与决策由 PA Agent 实时推送；关闭侧栏后内容不保留。";
+};
+livePort.onMessage.addListener((message) => {
+  if (message?.type === "PA_AGENT_LIVE_SNAPSHOT") {
+    renderLiveSnapshot(message.state);
+    return;
+  }
+  if (message?.type !== "PA_AGENT_LIVE_EVENT") return;
+  const event = message.event || {};
+  if (event.event === "started") {
+    renderLiveSnapshot({
+      symbol: event.symbol,
+      timeframe: event.timeframe,
+      status: "分析中"
+    });
+  } else if (event.event === "token") {
+    const key = `${event.stage}${event.channel === "thinking" ? "Thinking" : "Answer"}`;
+    const target = el(streamFields[key]);
+    if (target) {
+      if (target.textContent === "等待 Agent 输出…") target.textContent = "";
+      target.textContent += event.text || "";
+      target.scrollTop = target.scrollHeight;
+    }
+    el("liveStatus").textContent = "分析中";
+  } else if (event.event === "decision") {
+    renderDecision(event.decision);
+    el("liveStatus").textContent = "已完成";
+  } else if (event.event === "failed") {
+    el("liveStatus").textContent = event.error
+      ? `分析失败（已记录）：${event.error}`
+      : "分析失败（已记录）";
+  } else if (event.event === "cancelled") {
+    el("liveStatus").textContent = "分析已取消，回放保持在当前 K 线";
+  }
+});
 const toLocalInput = (time) => {
   if (!Number.isFinite(Number(time))) return "";
   const date = new Date(Number(time));
@@ -14,6 +86,7 @@ const paint = (state) => {
   const data = state.latest || {};
   const diagnostics = data.diagnostics || {};
   el("enabled").checked = !!state.enabled;
+  el("backtestMode").checked = !!state.backtestMode;
   el("autoCutoff").checked = state.autoCutoff !== false;
   el("historyCutoff").disabled = el("autoCutoff").checked;
   if (el("autoCutoff").checked) {
@@ -41,6 +114,7 @@ const paint = (state) => {
   if (data.error) statusText(data.error, true);
   else if (state.bridgeError) statusText(`本机后端连接失败：${state.bridgeError}`, true);
   else if (diagnostics.reader === "waiting-for-chart-candles") statusText("尚未收到包含 K 线的 TradingView 图表数据包；请确认图表已加载。", true);
+  else if (state.backtestMode && data.backtestStatus) statusText(data.backtestStatus);
 };
 
 async function refresh() {
@@ -53,6 +127,24 @@ el("enabled").addEventListener("change", async () => {
   el("enabled").checked = !!result?.enabled;
   statusText(result?.enabled ? "自动采集已开启。" : "自动采集已暂停。");
   setTimeout(refresh, 500);
+});
+el("backtestMode").addEventListener("change", async () => {
+  const toggle = el("backtestMode");
+  toggle.disabled = true;
+  const result = await request("PA_AGENT_SET_BACKTEST", { enabled: toggle.checked });
+  toggle.disabled = false;
+  toggle.checked = !!result?.backtestMode;
+  if (result?.error) statusText(result.error, true);
+  else if (result?.ok) {
+    statusText(
+      toggle.checked
+        ? "5 分钟回测已开启：当前 K 线分析完成后，扩展会收到 Agent 通知并推进下一根。"
+        : "5 分钟回测已关闭。"
+    );
+  } else {
+    statusText("回测模式切换失败", true);
+  }
+  await refresh();
 });
 el("captureNow").addEventListener("click", async () => {
   const button = el("captureNow");

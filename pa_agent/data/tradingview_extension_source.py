@@ -55,6 +55,10 @@ class TradingViewExtensionSource(TradingViewSource):
         """Attach the persisted multi-timeframe context settings."""
         self._context_settings = settings
 
+    def publish_analysis_stream(self, **payload: Any) -> None:
+        """Forward ephemeral LLM stream updates to the browser extension."""
+        self._bridge.publish_analysis_stream(**payload)
+
     def unsubscribe(self) -> None:
         self._symbol = ""
         self._timeframe = ""

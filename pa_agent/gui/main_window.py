@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import logging
 import sys
+import uuid
 from typing import Any
 
-from PyQt6.QtCore import QThread, QTimer, pyqtSignal, QObject
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QCloseEvent, QShowEvent
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -25,7 +27,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import Qt
 
 from pa_agent.ai.response_extract import reasoning_from_response
 from pa_agent.app_context import AppContext
@@ -133,6 +134,7 @@ class _AnalysisWorker(QThread):
     stage_prompt_ready = pyqtSignal(str, str, str)  # (stage, system, user)
     stage2_files_ready = pyqtSignal(list)  # strategy .txt filenames for stage 2
     retry_occurred = pyqtSignal(str)  # stage ("stage1" or "stage2")
+    stream_event = pyqtSignal(dict)  # ephemeral updates for the local extension
 
     def __init__(
         self,
@@ -141,6 +143,9 @@ class _AnalysisWorker(QThread):
         cancel_token: Any,
         previous_record: Any = None,
         incremental_new_bar_count: int | None = None,
+        symbol: str = "",
+        timeframe: str = "",
+        analysis_id: str = "",
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -149,6 +154,9 @@ class _AnalysisWorker(QThread):
         self._cancel_token = cancel_token
         self._previous_record = previous_record
         self._incremental_new_bar_count = incremental_new_bar_count
+        self._symbol = symbol
+        self._timeframe = timeframe
+        self._analysis_id = analysis_id
 
     def _persist_program_error_record(self, exc: Exception) -> Any:
         """Write a minimal failed record to pending when submit() raises unexpectedly."""
@@ -173,6 +181,21 @@ class _AnalysisWorker(QThread):
             return record
         except Exception as save_exc:  # noqa: BLE001
             logger.warning("Failed to persist program_error record: %s", save_exc)
+            return None
+
+    def _frame_latest_bar_time_ms(self) -> int | None:
+        """Resolve the newest analyzed bar timestamp for terminal stream events."""
+        try:
+            from pa_agent.data.datetime_ts import ts_open_to_ms
+
+            timestamps = [
+                int(ts_open_to_ms(bar.ts_open))
+                for bar in getattr(self._frame, "bars", ())
+                if getattr(bar, "ts_open", None) is not None
+            ]
+            return max(timestamps) if timestamps else None
+        except (TypeError, ValueError, OverflowError):
+            logger.debug("Could not resolve failed analysis bar timestamp", exc_info=True)
             return None
 
     def run(self) -> None:
@@ -201,15 +224,27 @@ class _AnalysisWorker(QThread):
 
         def on_stage1_reasoning(chunk: str) -> None:
             self.reasoning_token.emit("stage1", chunk)
+            self.stream_event.emit(self._stream_payload(
+                event="token", stage="stage1", channel="thinking", text=chunk
+            ))
 
         def on_stage1_content(chunk: str) -> None:
             self.content_token.emit("stage1", chunk)
+            self.stream_event.emit(self._stream_payload(
+                event="token", stage="stage1", channel="answer", text=chunk
+            ))
 
         def on_stage2_reasoning(chunk: str) -> None:
             self.reasoning_token.emit("stage2", chunk)
+            self.stream_event.emit(self._stream_payload(
+                event="token", stage="stage2", channel="thinking", text=chunk
+            ))
 
         def on_stage2_content(chunk: str) -> None:
             self.content_token.emit("stage2", chunk)
+            self.stream_event.emit(self._stream_payload(
+                event="token", stage="stage2", channel="answer", text=chunk
+            ))
 
         def on_stage_prompt(stage: str, system: str, user: str) -> None:
             self.stage_prompt_ready.emit(stage, system, user)
@@ -218,6 +253,7 @@ class _AnalysisWorker(QThread):
             self.stage2_files_ready.emit(files)
 
         try:
+            self.stream_event.emit(self._stream_payload(event="started"))
             record = self._orchestrator.submit(
                 self._frame,
                 self._cancel_token,
@@ -232,21 +268,51 @@ class _AnalysisWorker(QThread):
                 incremental_new_bar_count=self._incremental_new_bar_count,
             )
             decision = record.stage2_decision or {}
+            if getattr(record, "exception", None) or not decision:
+                exception = getattr(record, "exception", None) or {}
+                self.stream_event.emit(self._stream_payload(
+                    event="failed",
+                    bar_time=self._frame_latest_bar_time_ms(),
+                    error=str(
+                        exception.get("message", "分析未生成有效决策")
+                        if isinstance(exception, dict)
+                        else exception
+                    )[:500],
+                ))
+            else:
+                self.stream_event.emit(self._stream_payload(
+                    event="decision",
+                    decision=decision if isinstance(decision, dict) else {},
+                ))
         except Exception as exc:  # noqa: BLE001
             from pa_agent.ai.deepseek_client import CancelledError as _CancelledError
             if isinstance(exc, _CancelledError):
                 logger.info("Analysis worker cancelled: %s", exc)
                 decision = {}
                 record = None  # type: ignore[assignment]
+                self.stream_event.emit(self._stream_payload(event="cancelled"))
             else:
                 logger.error("Analysis worker error: %s", exc, exc_info=True)
                 decision = {}
                 record = self._persist_program_error_record(exc)
+                self.stream_event.emit(self._stream_payload(
+                    event="failed",
+                    bar_time=self._frame_latest_bar_time_ms(),
+                    error=str(exc)[:500],
+                ))
             self.error_occurred.emit(str(exc))
 
         if record is not None:
             self.record_ready.emit(record)
         self.finished.emit(decision)
+
+    def _stream_payload(self, **values: Any) -> dict[str, Any]:
+        return {
+            "symbol": self._symbol,
+            "timeframe": self._timeframe,
+            "analysis_id": self._analysis_id,
+            **values,
+        }
 
 
 # ── MainWindow ────────────────────────────────────────────────────────────────
@@ -267,8 +333,11 @@ class MainWindow(QMainWindow):
         self._prep_worker_id: object | None = None
         self._cancel_token: Any = None
         self._window_closing = False
+        self._shutdown_complete = False
+        self._visibility_guard: QTimer | None = None
         self._analysis_in_progress = False
         self._last_analysis_had_error = False
+        self._current_analysis_stream_id = ""
         self._switching = False
         self._chart_refresh_paused = False
         self._pending_submit_after_close = False
@@ -283,6 +352,7 @@ class MainWindow(QMainWindow):
         self._incremental_available: bool = False  # drives submit button label
         self._keep_analysis_last_closed_ts: int | None = None  # tracks last closed bar for keep-analysis
         self._keep_analysis_submit_closed_ts: int | None = None  # closed bar ts at analysis submit time
+        self._backtest_bootstrap_analysis_id: str | None = None
         self._free_chat_session: Any = None
         self._last_stage1_diagnosis: dict | None = None
         self._last_analysis_record: Any = None
@@ -331,6 +401,7 @@ class MainWindow(QMainWindow):
         self._future_trend_panel = self._ai_sidebar.future_trend
         self._decision_tree_panel = self._ai_sidebar.decision_tree
         self._decision_flow_viz_panel = self._ai_sidebar.decision_flow_viz
+        self._decision_history_panel = self._ai_sidebar.decision_history
 
         # Auto demo: when flow playback ends, return to stream tab.
         try:
@@ -2467,6 +2538,22 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             logger.debug("_refresh_keep_analysis_sentinel error: %s", exc)
 
+    def _backtest_mode_active(self) -> bool:
+        """Whether the Edge bridge has an active 5-minute replay session."""
+        if self._current_data_source_kind() != "tradingview":
+            return False
+        if self._tf_combo.currentText().strip() not in {"5", "5m"}:
+            return False
+        try:
+            data_source = getattr(self._ctx, "data_source", None)
+            status_reader = getattr(data_source, "bridge_status", None)
+            status = status_reader() if callable(status_reader) else status_reader
+            if not isinstance(status, dict):
+                return False
+            return bool(status.get("backtestEnabled"))
+        except Exception:  # noqa: BLE001
+            return False
+
     def _check_keep_analysis(self, bars: Any) -> None:
         """Trigger a new analysis round when keep-analysis is enabled and a new bar has closed.
 
@@ -2477,7 +2564,34 @@ class MainWindow(QMainWindow):
         """
         if not getattr(self, "_keep_analysis_checkbox", None):
             return
-        if not self._keep_analysis_checkbox.isChecked():
+        backtest_active = self._backtest_mode_active()
+        if not backtest_active:
+            self._backtest_bootstrap_analysis_id = None
+        elif self._backtest_bootstrap_analysis_id is None:
+            previous = getattr(self, "_last_analysis_record", None)
+            meta = getattr(previous, "meta", None)
+            previous_id = str(getattr(meta, "timestamp_local_ms", "") or "")
+            current_symbol = (
+                self._symbol_combo.currentText()
+                .strip().upper().split(":")[-1].replace("1!", "!")
+            )
+            previous_symbol = (
+                str(getattr(meta, "symbol", "") or "")
+                .strip().upper().split(":")[-1].replace("1!", "!")
+            )
+            if (
+                previous_id
+                and previous_symbol == current_symbol
+                and getattr(meta, "timeframe", "") in {"5m", "5"}
+            ):
+                try:
+                    from pa_agent.records.backtest_trade_tracker import BacktestTradeTracker
+
+                    BacktestTradeTracker().process_analysis(previous)
+                    self._backtest_bootstrap_analysis_id = previous_id
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Backtest trade bootstrap failed: %s", exc, exc_info=True)
+        if not self._keep_analysis_checkbox.isChecked() and not backtest_active:
             return
         if self._analysis_in_progress:
             logger.debug("持续跟踪分析：跳过（分析进行中）")
@@ -2524,11 +2638,33 @@ class MainWindow(QMainWindow):
 
             closed_ts = int(ts_open)
             if self._keep_analysis_last_closed_ts is None:
-                # First tick after enabling — record sentinel and immediately arm
-                # a wait for the *current* forming bar to close so the first
-                # analysis starts as soon as the bar in progress finishes, rather
-                # than waiting for an additional bar after that.
+                # In live mode, wait for the forming bar to close. In replay
+                # mode, the extension waits for this analysis to finish before
+                # it advances, so waiting for another close would deadlock.
                 self._keep_analysis_last_closed_ts = closed_ts
+                if backtest_active:
+                    symbol = self._symbol_combo.currentText().strip()
+                    tf = self._tf_combo.currentText()
+                    bar_count = self._analysis_bar_count()
+                    logger.info(
+                        "回放首根数据已同步（closed_ts=%s），立即启动分析",
+                        closed_ts,
+                    )
+                    if self._bars_sufficient_for_analysis(bars, bar_count):
+                        self._start_analysis_with_bars(
+                            symbol,
+                            tf,
+                            bar_count,
+                            bars,
+                            force_incremental=False,
+                        )
+                    else:
+                        logger.warning(
+                            "回放首根数据不足以分析（bars=%d，需要=%d）",
+                            len(bars),
+                            bar_count,
+                        )
+                    return
                 logger.info(
                     "持续跟踪分析：哨兵初始化 closed_ts=%s，立即 arm 等待当前K线收盘",
                     closed_ts,
@@ -3051,20 +3187,36 @@ class MainWindow(QMainWindow):
         self._cancel_analysis_prep_worker()
         prep_id = object()
         self._prep_worker_id = prep_id
-        prep = AnalysisPrepWorker(
-            bars_raw=list(snapshot_bars),
-            symbol=symbol,
-            timeframe=timeframe,
-            bar_count=bar_count,
-            now_ms=self._reference_now_ms(),
-            force_incremental=force_incremental,
-            incremental_threshold=threshold,
-            external_features=tuple(
-                getattr(getattr(self._ctx, "data_source", None), "analysis_features", lambda: ())()
-            ),
-            parent=None,
-        )
-        self._prep_worker = prep
+        try:
+            prep = AnalysisPrepWorker(
+                bars_raw=list(snapshot_bars),
+                symbol=symbol,
+                timeframe=timeframe,
+                bar_count=bar_count,
+                now_ms=self._reference_now_ms(),
+                force_incremental=force_incremental,
+                incremental_threshold=threshold,
+                external_features=tuple(
+                    getattr(
+                        getattr(self._ctx, "data_source", None),
+                        "analysis_features",
+                        lambda: (),
+                    )()
+                ),
+                parent=None,
+            )
+            self._prep_worker = prep
+        except Exception as exc:  # noqa: BLE001
+            self._prep_worker_id = None
+            self._publish_backtest_analysis_failed(
+                symbol, timeframe, snapshot_bars, str(exc)
+            )
+            self._analysis_in_progress = False
+            self._last_analysis_had_error = True
+            self._update_submit_button_state()
+            self._status_bar.showMessage(f"准备分析失败：{exc}")
+            logger.exception("Could not create analysis prep worker")
+            return
 
         def _on_ready(result: Any) -> None:
             if getattr(self, "_prep_worker_id", None) is not prep_id:
@@ -3087,6 +3239,9 @@ class MainWindow(QMainWindow):
             if not _qobject_alive(self):
                 return
             self._prep_worker = None
+            self._publish_backtest_analysis_failed(
+                symbol, timeframe, snapshot_bars, msg or "准备分析失败"
+            )
             self._analysis_in_progress = False
             self._update_submit_button_state()
             self._status_bar.showMessage(msg or "准备分析失败")
@@ -3094,7 +3249,19 @@ class MainWindow(QMainWindow):
 
         prep.ready.connect(_on_ready)
         prep.failed.connect(_on_failed)
-        prep.start()
+        try:
+            prep.start()
+        except Exception as exc:  # noqa: BLE001
+            self._prep_worker = None
+            self._prep_worker_id = None
+            self._publish_backtest_analysis_failed(
+                symbol, timeframe, snapshot_bars, str(exc)
+            )
+            self._analysis_in_progress = False
+            self._last_analysis_had_error = True
+            self._update_submit_button_state()
+            self._status_bar.showMessage(f"准备分析失败：{exc}")
+            logger.exception("Could not start analysis prep worker")
 
     def _launch_analysis_worker(
         self,
@@ -3109,6 +3276,9 @@ class MainWindow(QMainWindow):
         """UI-thread launch after background prep (frame + incremental lookup)."""
         frame = getattr(prep, "frame", None)
         if frame is None:
+            self._publish_backtest_analysis_failed(
+                symbol, timeframe, snapshot_bars, "数据不足，无法构建分析快照"
+            )
             self._analysis_in_progress = False
             self._update_submit_button_state()
             self._status_bar.showMessage("数据不足，请等待图表刷新后再提交")
@@ -3122,14 +3292,32 @@ class MainWindow(QMainWindow):
 
         if force_incremental and previous_record is None:
             reason = self._incremental_unavailable_reason(frame, symbol, timeframe)
+            self._publish_backtest_analysis_failed(
+                symbol, timeframe, snapshot_bars, reason
+            )
             self._analysis_in_progress = False
             self._update_submit_button_state()
             self._status_bar.showMessage(reason)
-            QMessageBox.warning(self, "无法增量分析", reason)
+            if not self._backtest_mode_active():
+                QMessageBox.warning(self, "无法增量分析", reason)
             return
 
-        orchestrator = self._build_orchestrator()
+        try:
+            orchestrator = self._build_orchestrator()
+        except Exception as exc:  # noqa: BLE001
+            self._publish_backtest_analysis_failed(
+                symbol, timeframe, snapshot_bars, str(exc)
+            )
+            self._analysis_in_progress = False
+            self._last_analysis_had_error = True
+            self._update_submit_button_state()
+            self._status_bar.showMessage(f"编排器初始化失败：{exc}")
+            logger.exception("Could not build analysis orchestrator")
+            return
         if orchestrator is None:
+            self._publish_backtest_analysis_failed(
+                symbol, timeframe, snapshot_bars, "编排器未就绪，请检查设置"
+            )
             self._analysis_in_progress = False
             self._update_submit_button_state()
             self._status_bar.showMessage("编排器未就绪，请检查设置")
@@ -3168,14 +3356,20 @@ class MainWindow(QMainWindow):
         worker_id = object()
         self._analysis_worker_id = worker_id
 
+        stream_analysis_id = uuid.uuid4().hex
+        self._current_analysis_stream_id = stream_analysis_id
         self._worker = _AnalysisWorker(
             orchestrator=orchestrator,
             frame=frame,
             cancel_token=self._cancel_token,
             previous_record=previous_record,
             incremental_new_bar_count=incremental_new_bar_count,
+            symbol=symbol,
+            timeframe=timeframe,
+            analysis_id=stream_analysis_id,
             parent=None,
         )
+        self._worker.stream_event.connect(self._publish_extension_stream_event)
         def _on_worker_finished(decision: dict) -> None:
             if getattr(self, "_analysis_worker_id", None) is not worker_id:
                 return
@@ -3206,7 +3400,20 @@ class MainWindow(QMainWindow):
             Qt.ConnectionType.UniqueConnection,
         )
         # Start AI worker before heavy chart/UI work so the UI stays responsive.
-        self._worker.start()
+        try:
+            self._worker.start()
+        except Exception as exc:  # noqa: BLE001
+            self._publish_backtest_analysis_failed(
+                symbol, timeframe, snapshot_bars, str(exc)
+            )
+            self._worker = None
+            self._analysis_worker_id = None
+            self._analysis_in_progress = False
+            self._last_analysis_had_error = True
+            self._update_submit_button_state()
+            self._status_bar.showMessage(f"分析线程启动失败：{exc}")
+            logger.exception("Could not start analysis worker")
+            return
 
         self._chart_widget.set_frame_now(frame, fit_view=True)
         self._set_chart_refresh_paused(True)
@@ -3269,6 +3476,17 @@ class MainWindow(QMainWindow):
             pf.clear()
             pf.set_stage1_files(stage1_prompt_txt_files())
             pf.set_extras(stage1_builtin=True)
+
+    def _publish_extension_stream_event(self, payload: dict) -> None:
+        """Send live analysis updates to the extension bridge without persistence."""
+        source = getattr(self._ctx, "data_source", None)
+        publish = getattr(source, "publish_analysis_stream", None)
+        if not callable(publish):
+            return
+        try:
+            publish(**payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Extension live analysis update skipped: %s", exc)
 
     def _find_incremental_base_record(
         self,
@@ -3380,6 +3598,109 @@ class MainWindow(QMainWindow):
         s1 = getattr(self, "_last_stage1_diagnosis", None)
         return s1 if isinstance(s1, dict) else {}
 
+    def _publish_backtest_analysis_completed(self, decision: dict) -> None:
+        """Push a completion event so the extension can advance the replay."""
+        if not decision or not self._backtest_mode_active():
+            return
+        record = getattr(self, "_last_analysis_record", None)
+        if record is None or getattr(record, "exception", None):
+            return
+        meta = getattr(record, "meta", None)
+        symbol = str(getattr(meta, "symbol", "") or "").strip()
+        timeframe = str(getattr(meta, "timeframe", "") or "").strip()
+        if not symbol or not timeframe:
+            return
+        bar_times: list[int] = []
+        try:
+            from pa_agent.data.datetime_ts import ts_open_to_ms
+
+            for bar in getattr(record, "kline_data", None) or []:
+                if isinstance(bar, dict) and bar.get("ts_open") is not None:
+                    bar_times.append(int(ts_open_to_ms(bar["ts_open"])))
+        except (TypeError, ValueError, OverflowError):
+            logger.debug("Could not resolve backtest analysis bar timestamp", exc_info=True)
+            return
+        if not bar_times:
+            return
+        publisher = getattr(getattr(self._ctx, "data_source", None), "publish_analysis_stream", None)
+        if not callable(publisher):
+            return
+        publisher(
+            event="completed",
+            symbol=symbol,
+            timeframe=timeframe,
+            analysis_id=(
+                self._current_analysis_stream_id
+                or str(getattr(meta, "timestamp_local_ms", "") or "")
+            ),
+            bar_time=max(bar_times),
+        )
+        logger.info(
+            "Published backtest analysis completion: symbol=%s timeframe=%s bar_time=%s",
+            symbol,
+            timeframe,
+            max(bar_times),
+        )
+
+    def _publish_backtest_analysis_failed(
+        self,
+        symbol: str,
+        timeframe: str,
+        bars: Any,
+        error: str,
+    ) -> None:
+        """Notify replay after a pre-worker failure so it cannot wait forever."""
+        if not self._backtest_mode_active():
+            return
+        publisher = getattr(
+            getattr(self._ctx, "data_source", None),
+            "publish_analysis_stream",
+            None,
+        )
+        if not callable(publisher):
+            return
+        from pa_agent.data.datetime_ts import ts_open_to_ms
+
+        bar_times: list[int] = []
+        for bar in bars or ():
+            raw_ts = getattr(bar, "ts_open", None)
+            if raw_ts is None and isinstance(bar, dict):
+                raw_ts = bar.get("ts_open")
+            if raw_ts is None:
+                continue
+            try:
+                bar_times.append(int(ts_open_to_ms(raw_ts)))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if not bar_times:
+            logger.warning(
+                "Backtest analysis failed before worker launch without a bar timestamp: %s",
+                error,
+            )
+            return
+        analysis_id = uuid.uuid4().hex
+        publisher(
+            event="started",
+            symbol=symbol,
+            timeframe=timeframe,
+            analysis_id=analysis_id,
+        )
+        publisher(
+            event="failed",
+            symbol=symbol,
+            timeframe=timeframe,
+            analysis_id=analysis_id,
+            bar_time=max(bar_times),
+            error=str(error)[:500],
+        )
+        logger.warning(
+            "Published backtest pre-worker failure: symbol=%s timeframe=%s bar_time=%s error=%s",
+            symbol,
+            timeframe,
+            max(bar_times),
+            str(error)[:300],
+        )
+
     def _on_analysis_finished(self, decision: dict) -> None:
         """Called on the main thread when the AI worker completes.
 
@@ -3389,6 +3710,11 @@ class MainWindow(QMainWindow):
         """
         if not self._ui_is_alive():
             return
+        if decision:
+            try:
+                self._publish_backtest_analysis_completed(decision)
+            except Exception:  # noqa: BLE001
+                logger.exception("Backtest analysis completion event failed")
         if decision:
             from pa_agent.gui.stage2_payload import prepare_stage2_for_ui
 
@@ -3428,6 +3754,13 @@ class MainWindow(QMainWindow):
                 decision_stance=stance,
                 confidence_threshold=self._confidence_threshold(),
             )
+            history_panel = getattr(self, "_decision_history_panel", None)
+            if history_panel is not None:
+                history_panel.add_decision(
+                    decision,
+                    symbol=self._symbol_combo.currentText().strip(),
+                    timeframe=self._tf_combo.currentText().strip(),
+                )
             self._future_trend_panel.set_prediction(inner)
             self._bind_decision_tree(decision, stage1_diag or None)
             order = inner.get("order_type", "—")
@@ -3591,6 +3924,12 @@ class MainWindow(QMainWindow):
             sidebar.focus_raw()
         if debug is not None:
             debug.focus_exception_turn()
+        if self._backtest_mode_active():
+            detail_text = f"：{detail}" if detail else ""
+            self._status_bar.showMessage(
+                f"回测分析异常，错误已记录；自动流程继续处理{detail_text}"
+            )
+            return
 
         if exc_info:
             body = self._build_exception_debug_bundle(exc_info, record=record)
@@ -3621,6 +3960,8 @@ class MainWindow(QMainWindow):
 
     def _maybe_show_truncation_help_dialog(self, exc_info: dict | None) -> None:
         """If validation indicates truncation/context shortage, prompt user actions."""
+        if self._backtest_mode_active():
+            return
         if not exc_info or not isinstance(exc_info, dict):
             return
         msg = str(exc_info.get("message", "") or "")
@@ -3724,6 +4065,30 @@ class MainWindow(QMainWindow):
 
     def _on_record_ready_impl(self, record: Any) -> None:
         self._last_analysis_record = record
+        if self._backtest_mode_active():
+            try:
+                from pa_agent.records.backtest_trade_tracker import BacktestTradeTracker
+
+                trade_state = BacktestTradeTracker().process_analysis(record)
+                self._backtest_bootstrap_analysis_id = str(
+                    getattr(getattr(record, "meta", None), "timestamp_local_ms", "") or ""
+                )
+                active_trade = trade_state.get("active_trade") if trade_state else None
+                logger.info(
+                    "Backtest trade state: %s",
+                    {
+                        "symbol": getattr(getattr(record, "meta", None), "symbol", ""),
+                        "timeframe": getattr(getattr(record, "meta", None), "timeframe", ""),
+                        "status": active_trade.get("status") if active_trade else "flat",
+                        "direction": active_trade.get("direction") if active_trade else None,
+                        "fill_price": active_trade.get("fill_price") if active_trade else None,
+                        "tp1": active_trade.get("take_profit_1_hit") if active_trade else False,
+                        "tp2": active_trade.get("take_profit_2_hit") if active_trade else False,
+                        "sl": active_trade.get("stop_loss_hit") if active_trade else False,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Backtest trade tracking failed: %s", exc, exc_info=True)
         import json as _json
 
         exc_info = getattr(record, "exception", None)
@@ -4109,6 +4474,11 @@ class MainWindow(QMainWindow):
             return False
         if not self._has_order_opportunity(decision_inner):
             return False
+        if self._backtest_mode_active():
+            self._status_bar.showMessage(
+                "回测中检测到入场机会；决策已显示并记录，自动回放继续"
+            )
+            return False
 
         from pa_agent.gui.order_opportunity import (
             play_order_alert_sound,
@@ -4162,7 +4532,7 @@ class MainWindow(QMainWindow):
             keep_analysis_on = (
                 getattr(self, "_keep_analysis_checkbox", None) is not None
                 and self._keep_analysis_checkbox.isChecked()
-            )
+            ) or self._backtest_mode_active()
             if keep_analysis_on and self._chart_refresh_paused:
                 self._set_chart_refresh_paused(False)
 
@@ -4180,20 +4550,52 @@ class MainWindow(QMainWindow):
             logger.debug("MainWindow UI torn down during worker cleanup: %s", exc)
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
-        """Stop background work before Qt destroys widgets."""
+        """Stop background work and explicitly exit the Qt event loop."""
+        self.shutdown()
+        if event is not None:
+            event.accept()
+        app = QApplication.instance()
+        if app is not None:
+            # Defer until the close event has finished so cleanup cannot leave
+            # the process alive when another top-level window is still open.
+            QTimer.singleShot(0, app.quit)
+
+    def shutdown(self) -> None:
+        """Release GUI and application resources exactly once."""
+        if self._shutdown_complete:
+            return
+        self._shutdown_complete = True
         self._window_closing = True
+        logger.info("PA Agent shutdown requested")
+        if self._visibility_guard is not None:
+            self._visibility_guard.stop()
         try:
             self._cancel_analysis_worker()
             self._cancel_snapshot_fetch_worker()
             self._stop_refresh_loop()
-            self._disconnect_data_source(getattr(self._ctx, "data_source", None))
-        except RuntimeError as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Shutdown cleanup skipped: %s", exc)
-        super().closeEvent(event)
+        finally:
+            self._ctx.shutdown()
+
+    def _quit_if_main_window_hidden(self) -> None:
+        """Fallback for macOS close paths that do not emit lastWindowClosed."""
+        if self._shutdown_complete or self.isVisible():
+            return
+        logger.info("Main window is hidden; exiting PA Agent")
+        self.shutdown()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def showEvent(self, event: QShowEvent | None) -> None:
         """On first show, prompt for API Key when missing."""
         super().showEvent(event)
+        if self._visibility_guard is None:
+            self._visibility_guard = QTimer(self)
+            self._visibility_guard.setInterval(500)
+            self._visibility_guard.timeout.connect(self._quit_if_main_window_hidden)
+            self._visibility_guard.start()
         if self._startup_api_key_check_done:
             return
         self._startup_api_key_check_done = True

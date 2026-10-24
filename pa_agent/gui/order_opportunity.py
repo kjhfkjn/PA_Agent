@@ -105,6 +105,8 @@ def show_order_opportunity_alert(parent: Any, decision: dict[str, Any]) -> None:
     box.setWindowTitle("下单机会")
     box.setText(format_order_alert_message(decision))
     box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    box.setModal(False)
+    box.setWindowModality(Qt.WindowModality.NonModal)
     timer = QTimer(box)
     timer.setSingleShot(True)
     timer.timeout.connect(box.accept)
