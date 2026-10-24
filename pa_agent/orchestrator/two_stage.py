@@ -711,7 +711,11 @@ class TwoStageOrchestrator:
         on_event(OrchestratorEvent.Stage1Done)
 
         # ── Step 10: Route strategy files ─────────────────────────────────────
-        if callable(self._router) and not hasattr(self._router, "route"):
+        # The compact PA/ICT path has its own short entry/risk rules and does not
+        # load the legacy strategy-tree prompt library.
+        if analysis_mode == "compact_two_stage":
+            strategy_files = []
+        elif callable(self._router) and not hasattr(self._router, "route"):
             strategy_files: list[str] = self._router(stage1_json)
         else:
             strategy_files = self._router.route(stage1_json)
@@ -823,6 +827,7 @@ class TwoStageOrchestrator:
             enable_next_bar_prediction=_enable_next_bar,
             provider_settings=getattr(self._settings, "provider", None),
             structure_flip_cooldown_bars=_flip_cooldown,
+            analysis_mode=analysis_mode,
         )
 
         # ── Step 15: Call AI for Stage 2 ──────────────────────────────────────

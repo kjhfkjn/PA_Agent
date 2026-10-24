@@ -1,4 +1,4 @@
-"""GUI analysis mode presets for Stage 2 prompt construction."""
+"""Selectable LLM analysis prompt modes."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from pa_agent.config.settings import Settings
 
-AnalysisModeKey = Literal["original", "optimized"]
+AnalysisModeKey = Literal["original", "optimized", "compact_two_stage"]
 
 
 @dataclass(frozen=True)
@@ -22,21 +22,27 @@ class GuiAnalysisMode:
 _MODES: tuple[GuiAnalysisMode, ...] = (
     GuiAnalysisMode(
         key="original",
-        label="原始分析过程",
-        description="保留当前完整二阶段续写上下文，适合复盘和最大可追溯性。",
+        label="策略树模式（完整提示词）",
+        description="沿用原有完整策略树提示词，保留全部分析规则。",
     ),
     GuiAnalysisMode(
-        key="optimized",
-        label="优化分析过程",
-        description="减少二阶段重复上下文和冗长思考，适合日常盯盘提速。",
+        key="compact_two_stage",
+        label="精简两阶段（PA/ICT）",
+        description=(
+            "用短提示词分析市场结构与入场条件；保留有效 K 线、风险回报和校验，"
+            "决策结果仍可用于策略树可视化。"
+        ),
     ),
 )
 
 _MODE_BY_KEY = {mode.key: mode for mode in _MODES}
+# ``optimized`` was accepted by an earlier prompt-mode scaffold but did not
+# select a distinct prompt path. Keep old saved values mapped to the legacy mode.
+_MODE_BY_KEY["optimized"] = _MODE_BY_KEY["original"]  # type: ignore[index]
 
 
 def analysis_mode_choices() -> list[tuple[str, str]]:
-    """Return toolbar choices in display order."""
+    """Return selectable modes in display order."""
     return [(mode.key, mode.label) for mode in _MODES]
 
 
@@ -60,5 +66,5 @@ def infer_analysis_mode_key(settings: "Settings | None") -> str:
         return "original"
     mode = str(getattr(settings.general, "analysis_mode", "original") or "original")
     if mode in _MODE_BY_KEY:
-        return mode
+        return _MODE_BY_KEY[mode].key  # type: ignore[index]
     return "original"

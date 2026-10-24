@@ -642,15 +642,71 @@ trade_confidence_reasoning：必须简要说明打分依据（如“入场信号
 estimated_win_rate_reasoning：必须简要说明依据（如“宽通道顺势 Low1，结构支持约 45–50%，取 47% 用于方程”）
 """.strip()
 
+# ── Compact PA/ICT two-stage prompt mode ──────────────────────────────────────
+
+_COMPACT_TWO_STAGE_MODE = "compact_two_stage"
+
+_COMPACT_SYSTEM_PROMPT = """\
+你是 PA/ICT 价格行为交易分析助手。只使用本轮提供的 K 线、程序特征和诊断，不调用工具、不补造数据。
+两阶段都用简体中文；严格按当前任务要求输出裸 JSON，字段名与枚举值保持规定格式。
+分析必须落到可核对的 K 线、价格结构和风险边界；证据不够时明确等待，不为凑交易理由而下单。
+""".strip()
+
+_STAGE1_COMPACT_RULES = """\
+## 阶段一：精简市场诊断
+判断当前周期/阶段、近期方向与较长背景是否一致、动能/转折风险。识别价格行为结构及有 K 线依据的 ICT setup；
+ICT 候选包括流动性扫荡、位移、FVG、订单块/反转订单块及结构转变，只标记 OHLC 能验证的项目。
+支撑阻力只列当前价格附近、仍有效的结构位，可包含 PA 摆动位、ICT 区域或突破缺口；在 key_signals/htf_context 标出类型与依据。
+突破缺口须能指出形成 K 线、方向、边界和是否回补，并与 ICT FVG 分开；已回补或无法定位的缺口不得作有效支撑阻力。
+不在本阶段定具体订单、止损、止盈或仓位。结论依据要简短，保留必要 K 线序号；不确定则降低置信度。
+""".strip()
+
+_STAGE1_COMPACT_OUTPUT_REMINDER = """\
+只输出阶段一裸 JSON。必须含下列字段；不得输出围栏或前后说明：
+{"cycle_position":"spike|micro_channel|tight_channel|normal_channel|broad_channel|trending_tr|trading_range|extreme_tr|unknown","alternative_cycle_position":null,"direction":"bullish|bearish|neutral","diagnosis_confidence":0,"spike_stage":null,"climax_risk":"none|warning|triggered","market_phase":"stable|transitioning","transition_risk":null,"detected_patterns":[],"key_signals":[],"htf_context":"","trend_context":{"background_direction":"bullish|bearish|neutral","trading_direction":"bullish|bearish|neutral","primary_direction":"bullish|bearish|neutral","conflict":false,"relationship":"aligned|conflict|neutral_background|mixed"},"entry_setup":"","support_levels":[],"resistance_levels":[],"strategy_files_needed":[],"risk_warning":"","bar_analysis":{"always_in":"long|short|neutral","last_closed_bar":"K1","bar_type":"trend_bull|trend_bear|doji|inside|outside_bull|outside_bear|flat|other","signal_bar":{"bar":null,"quality":"invalid","reason":""},"entry_setup_type":"none","follow_through":"pending"},"bar_by_bar_summary":[],"gate_trace":[],"gate_result":"proceed|wait|unknown"}
+- `bar_by_bar_summary` 恰好 5 条，按 K5、K4、K3、K2、K1 各写一句；每条含 bar、role、bar_type、context_effect、follow_through、trapped_side、reason。bar_type 须照抄程序特征表。
+- role 用 structure/signal/entry/confirmation/noise/trap/climax/test；context_effect 用 strengthens_bull、weakens_bull、strengthens_bear、weakens_bear、weakened_bull、weakened_bear、neutral 或 transition；follow_through 用 yes/no/pending/failed；trapped_side 用 bulls/bears/both/none/unknown。
+- `gate_trace` 只写 1.2、1.3、2.1、2.2、2.5 五个节点；每项含 node_id、question、answer、reason、bar_range。1.2 写周期，2.1 写近期方向，2.2 写高低周期关系；最后一项说明是否进入阶段二。其余三个节点由程序补入。
+- 仅周期无法识别或市场极端混乱时 gate_result=wait/unknown；否则为 proceed。spike 时填写 spike_stage；market_phase=transitioning 时填写 transition_risk。
+- 支撑/阻力各最多 3 项，只列有效结构位；证据不足填空数组。不得把 ICT FVG 与突破缺口重复计为两条证据。
+""".strip()
+
+_STAGE2_COMPACT_RULES = """\
+## 阶段二：精简交易评估
+以阶段一诊断为背景，复核最近 K 线并独立作出是否下单的决定。市场阶段、方向、关键结构和失效条件须与当前数据一致。
+- 有下单必须至少有两条独立、同向、能由 K 线验证的理由，分别列入 `key_factors`；可结合价格行为信号、可验证 ICT setup、有效突破缺口。相同位移产生的 FVG/失衡/缺口只算一条。
+- 可核对的 ICT 依据包括流动性扫荡、位移、FVG、订单块/反转订单块及结构转变；数据不足时不推断。
+- 优先用收盘信号棒高/低点外触发的突破单（止损触发单）。仅在趋势清晰、价格回到前一仍有效且未回补的突破缺口、结构止损和目标明确、同样满足两条独立理由时用限价单；普通支撑/阻力、EMA 或通道边界不能单独作为限价例外。
+- 计划型缺口限价单无已收盘信号棒时，`signal_bar` 用 `bar=null, quality=invalid, pattern=breakout_pullback`，`entry_bar` 用 `bar=null, strength=not_triggered, freshness=pending`。
+- 止损放在结构失效位；TP1 以最近有效结构目标为准，风险回报比须至少 1:1，能合理达到更高则优先。无法同时满足证据、触发条件、结构止损和 TP1 盈亏比时等待。
+- 反转/MTR 只作诊断，不给逆势三价。不得用虚构缺口、重复证据或随意移动止损来凑条件。
+- 简洁填写 trace：无交易时至少写导致等待的 9.0 或 9.0P 节点；有交易时写入场判断、10.1/10.2/10.3 与 11.1。挂单等待触发时 `entry_bar` 为 pending；terminal 与 decision 一致。
+""".strip()
+
+_STAGE2_COMPACT_OUTPUT_CONTRACT = """\
+只输出完整阶段二裸 JSON；`terminal` 与 `decision` 同级。字段简洁，但必填项不得省略：
+{"decision":{"order_direction":null,"order_type":"不下单","entry_price":null,"entry_basis_bar":null,"entry_basis_extreme":null,"entry_rule":null,"take_profit_price":null,"take_profit_price_2":null,"stop_loss_price":null,"reasoning":"","diagnosis_confidence":0,"diagnosis_confidence_reasoning":"","trade_confidence":0,"trade_confidence_reasoning":"","estimated_win_rate":null,"estimated_win_rate_reasoning":null,"key_factors":[],"watch_points":[],"risk_assessment":"","invalidation_condition":null},"diagnosis_summary":{"cycle_position":"","direction":"","key_signals":[]},"bar_analysis":{"always_in":"long|short|neutral","last_closed_bar":"K1","bar_type":"trend_bull|trend_bear|doji|inside|outside_bull|outside_bear|flat|other","signal_bar":{"bar":null,"quality":"invalid","pattern":"none","reason":""},"entry_bar":{"bar":null,"strength":"not_triggered","follow_through":"pending","still_valid":true,"freshness":"pending"}},"decision_trace":[{"node_id":"9.0","question":"节点9.0","answer":"否","reason":"","bar_range":"K1"}],"terminal":{"node_id":"9.0","outcome":"wait","label":"等待"}}
+不下单时 order_direction、entry_price、entry_basis_bar、entry_basis_extreme、entry_rule、TP1、TP2、stop_loss_price、estimated_win_rate 均为 null。
+下单时必须给出方向、entry/stop/TP1/TP2 数值及上述 bar_analysis；突破单还须给 entry_basis_bar、entry_basis_extreme、entry_rule。TP1 风险回报比至少 1:1。
+`decision_trace` 每项含 node_id、question、answer、reason、bar_range；10.3 的 reason 须包含胜率、风险和 TP1 回报的数字依据。有下单时需含 9.x、10.1、10.2、10.3、11.1，10.3=是。
+未启用下根 K 线预测时省略 `next_bar_prediction` 和 `next_cycle_prediction`，程序会补全；启用时输出完整字段：direction、三类 probabilities、reasoning、unpredictable、features_used。概率和为100，direction取最大值，理由简短。
+""".strip()
+
+
+def _is_compact_two_stage_mode(analysis_mode: str) -> bool:
+    return str(analysis_mode or "").strip().lower() == _COMPACT_TWO_STAGE_MODE
+
+
 # ── Analysis-mode–aware Stage 1 output rule ───────────────────────────────────
 
 
 def _stage1_output_reminder_for_mode(analysis_mode: str = "original") -> str:
-    """Return Stage 1 output rules (same for original and optimized).
+    """Return Stage 1 output rules for the selected prompt path.
 
     Program prefill handles §1.1/§2.3/§2.4; AI outputs the five gate nodes only.
     """
-    _ = analysis_mode  # reserved for future mode-specific tweaks
+    if _is_compact_two_stage_mode(analysis_mode):
+        return _STAGE1_COMPACT_OUTPUT_REMINDER
     return _STAGE1_OUTPUT_REMINDER
 
 
@@ -827,8 +883,10 @@ def _fmt_feature(value: float | None) -> str:
     return "N/A" if value is None else f"{value:.3f}"
 
 
-def stage1_prompt_txt_files() -> list[str]:
+def stage1_prompt_txt_files(*, analysis_mode: str = "original") -> list[str]:
     """Return ordered .txt filenames injected in the Stage 1 prompt."""
+    if _is_compact_two_stage_mode(analysis_mode):
+        return []
     return [*COMMON_SYSTEM_STAGE1_TXT_FILES, *STAGE1_TASK_PROMPT_TXT_FILES]
 
 
@@ -880,8 +938,11 @@ def stage2_prompt_txt_files(
     *,
     direction: str = "",
     load_full_strategy_library: bool = False,
+    analysis_mode: str = "original",
 ) -> list[str]:
     """Return all .txt files relevant to Stage 2 (system common + user task), for UI/debug."""
+    if _is_compact_two_stage_mode(analysis_mode):
+        return []
     return [
         *COMMON_SYSTEM_STAGE2_TXT_FILES,
         *stage2_user_task_txt_files(
@@ -935,12 +996,16 @@ class PromptAssembler:
         _SYSTEM_PROMPT_CACHE[key] = built
         return built
 
-    def _build_stage1_system_prompt(self) -> str:
+    def _build_stage1_system_prompt(self, analysis_mode: str = "original") -> str:
         """Return cached shared system prompt."""
+        if _is_compact_two_stage_mode(analysis_mode):
+            return _COMPACT_SYSTEM_PROMPT
         return self._shared_system_prompt
 
-    def _build_stage2_system_prompt(self) -> str:
+    def _build_stage2_system_prompt(self, analysis_mode: str = "original") -> str:
         """Return cached shared system prompt (byte-identical to Stage 1)."""
+        if _is_compact_two_stage_mode(analysis_mode):
+            return _COMPACT_SYSTEM_PROMPT
         return self._shared_system_prompt
 
     def _build_shared_system_prompt_inner(self) -> str:
@@ -1086,7 +1151,7 @@ class PromptAssembler:
 
     def build_stage1(self, frame: KlineFrame, *, analysis_mode: str = "original") -> list[dict]:
         """Build the message list for Stage 1 (market diagnosis)."""
-        system_content = self._build_stage1_system_prompt()
+        system_content = self._build_stage1_system_prompt(analysis_mode)
         user_content = self._build_stage1_user_prompt(frame, analysis_mode=analysis_mode)
 
         return [
@@ -1200,7 +1265,7 @@ class PromptAssembler:
         else:
             assistant_turn = {"role": "assistant", "content": prev_assistant_content}
 
-        system_content = self._build_stage1_system_prompt()
+        system_content = self._build_stage1_system_prompt(analysis_mode)
         incremental_user_content = self._build_incremental_stage1_continuation_user_prompt(
             frame,
             previous_record,
@@ -1308,8 +1373,42 @@ class PromptAssembler:
             logger.warning("_render_program_prefill_hint failed: %s", exc)
             return ""
 
+    def _build_compact_stage1_user_prompt(self, frame: KlineFrame) -> str:
+        """Build the short PA/ICT diagnosis prompt while keeping full price history."""
+        n_bars = len(frame.bars)
+        kline_table = self._render_kline_table(frame)
+        # The full OHLC history supports cycle/context analysis; detailed geometry
+        # is only needed for the five bars summarized by the required output.
+        recent_feature_table = self._render_kline_feature_table(
+            frame,
+            limit=min(5, n_bars),
+        )
+        simple_features_block = self._render_simple_market_features_block(frame)
+        external_feature_block = self._render_external_feature_blocks(frame)
+        prefill_hint = self._render_program_prefill_hint(frame)
+
+        return (
+            "## 阶段一任务\n\n"
+            f"{_STAGE1_COMPACT_RULES}\n\n"
+            f"{_stage1_output_reminder_for_mode(_COMPACT_TWO_STAGE_MODE)}\n\n"
+            f"品种：{frame.symbol}；主周期：{frame.timeframe}；已收盘 K 线：{n_bars} 根。"
+            f"序号 1=最新，K{n_bars}=最早；只引用表内序号。\n\n"
+            "## 完整 OHLC 历史\n\n"
+            f"{kline_table}\n\n"
+            "## 最近五根几何特征\n\n"
+            f"{recent_feature_table}\n\n"
+            + (f"{simple_features_block}\n\n" if simple_features_block else "")
+            + (f"{external_feature_block}\n\n" if external_feature_block else "")
+            + (f"{prefill_hint}\n\n" if prefill_hint else "")
+            + "先定市场状态和证据，再输出紧凑完整 JSON；不得省略必填字段。\n\n"
+            f"{_STAGE1_TAIL_REMINDER}"
+        )
+
     def _build_stage1_user_prompt(self, frame: KlineFrame, *, analysis_mode: str = "original") -> str:
         """Build the Stage 1 task turn; stage-specific rules stay out of system."""
+        if _is_compact_two_stage_mode(analysis_mode):
+            return self._build_compact_stage1_user_prompt(frame)
+
         pattern_block = self._stage1_pattern_supplement()
         prefill_hint = self._render_program_prefill_hint(frame)
         stage1_parts = [
@@ -1461,6 +1560,29 @@ class PromptAssembler:
         Injects program prefill hint so the AI knows updated §2.3/§2.4 verdicts
         even when the full K-line table is not re-sent.
         """
+        if _is_compact_two_stage_mode(analysis_mode):
+            n_bars = len(frame.bars)
+            shift_n = max(0, min(new_bar_count, n_bars))
+            prefill_hint = self._render_program_prefill_hint(frame)
+            simple_features_block = self._render_simple_market_features_block(frame)
+            new_kline_table = self._render_kline_table(frame, limit=shift_n)
+            new_feature_table = self._render_kline_feature_table(frame, limit=shift_n)
+            return (
+                "## 阶段一增量更新\n\n"
+                f"上方含本轮完整 OHLC 历史和上一轮诊断；本轮新增 {shift_n} 根已收盘 K 线。"
+                f"上一轮 K 引用已整体平移 +{shift_n}，可直接使用。\n"
+                "先独立重看当前结构，只有新增数据支持时才延续旧方向；突破、反转或原结构失效时更新结论。\n"
+                "在完整阶段一 JSON 中附 `incremental_delta`，准确列出新增 K 线、变化字段和一句变化摘要。\n\n"
+                f"{_STAGE1_COMPACT_RULES}\n\n"
+                f"{_stage1_output_reminder_for_mode(analysis_mode)}\n\n"
+                f"新增 OHLC（K1=最新）：\n{new_kline_table}\n\n"
+                f"新增 K 线几何特征：\n{new_feature_table}\n\n"
+                + (f"{simple_features_block}\n\n" if simple_features_block else "")
+                + (f"{prefill_hint}\n\n" if prefill_hint else "")
+                + "输出完整的更新后 JSON，不要输出说明文字。\n\n"
+                f"{_STAGE1_TAIL_REMINDER}"
+            )
+
         prefill_hint = self._render_program_prefill_hint(frame)
         simple_features_block = self._render_simple_market_features_block(frame)
         if simple_features_block:
@@ -1538,9 +1660,10 @@ class PromptAssembler:
         experience_entries: list[Any],
         *,
         decision_stance: str = "conservative",
+        analysis_mode: str = "original",
     ) -> list[dict]:
         """Build a standalone Stage 2 request (kept for tests/tools)."""
-        system_content = self._build_stage2_system_prompt()
+        system_content = self._build_stage2_system_prompt(analysis_mode)
         user_content = self._build_stage2_user_prompt(
             frame=frame,
             stage1_json=stage1_json,
@@ -1548,6 +1671,7 @@ class PromptAssembler:
             experience_entries=experience_entries,
             decision_stance=decision_stance,
             enable_next_bar_prediction=False,
+            analysis_mode=analysis_mode,
         )
         return [
             {"role": "system", "content": system_content},
@@ -1618,6 +1742,7 @@ class PromptAssembler:
         provider_settings: Any | None = None,
         use_prefix_chain: bool | None = None,
         structure_flip_cooldown_bars: int = 3,
+        analysis_mode: str = "original",
     ) -> list[dict]:
         """Build Stage 2 messages, optionally chaining after Stage 1 for KV cache.
 
@@ -1643,6 +1768,7 @@ class PromptAssembler:
             enable_next_bar_prediction=enable_next_bar_prediction,
             omit_kline_block=chain_after_s1,
             structure_flip_cooldown_bars=structure_flip_cooldown_bars,
+            analysis_mode=analysis_mode,
         )
 
         if chain_after_s1:
@@ -1664,11 +1790,111 @@ class PromptAssembler:
             chain.append({"role": "user", "content": stage2_user_content})
             return chain
 
-        system_content = self._build_stage2_system_prompt()
+        system_content = self._build_stage2_system_prompt(analysis_mode)
         return [
             {"role": "system", "content": system_content},
             {"role": "user", "content": stage2_user_content},
         ]
+
+    def _build_compact_stage2_user_prompt(
+        self,
+        *,
+        frame: KlineFrame,
+        stage1_json: dict,
+        experience_entries: list[Any],
+        decision_stance: str,
+        previous_record: Any | None,
+        enable_next_bar_prediction: bool,
+        omit_kline_block: bool,
+        structure_flip_cooldown_bars: int,
+    ) -> str:
+        """Build a short decision prompt without loading the strategy-tree library."""
+        from pa_agent.ai.decision_continuity import (
+            build_continuity_context,
+            render_continuity_prompt_block,
+        )
+        from pa_agent.util.price_tick import format_breakout_tick_hint
+
+        stance_block = build_decision_stance_guidance(normalize_stance(decision_stance))
+        continuity_ctx = build_continuity_context(
+            frame=frame,
+            stage1_json=stage1_json,
+            previous_record=previous_record,
+            cooldown_bars=structure_flip_cooldown_bars,
+        )
+        context_parts = [
+            stance_block,
+            render_continuity_prompt_block(continuity_ctx),
+            self._render_trend_conflict_guidance(stage1_json),
+            self._render_transition_guidance(stage1_json),
+            self._render_planned_limit_hint(stage1_json, frame),
+            _STAGE2_COMPACT_RULES,
+        ]
+        if experience_entries:
+            max_chars = 400
+            if self._prompt_settings is not None:
+                max_chars = int(
+                    getattr(self._prompt_settings, "experience_max_chars_per_entry", 400)
+                )
+            context_parts.append(
+                self._render_experience(
+                    experience_entries,
+                    max_chars_per_entry=max_chars,
+                )
+            )
+        context_parts.append(_STAGE2_COMPACT_OUTPUT_CONTRACT)
+        if enable_next_bar_prediction:
+            context_parts.append(
+                "## 下根 K 线预测\n"
+                "另输出 `next_bar_prediction`，含 direction、probabilities、reasoning、unpredictable、features_used；"
+                "三类概率为整数且和为100，direction取最大项。无法判断时三项概率和方向填 null、unpredictable=true。"
+            )
+        else:
+            context_parts.append(
+                "下根 K 线预测已关闭，省略 next_bar_prediction；"
+                "next_cycle_prediction 也省略，由程序补全。"
+            )
+        stage2_context = "\n\n".join(part for part in context_parts if part)
+
+        compact_s1 = json.dumps(
+            self._compact_stage1_for_stage2(stage1_json),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        breakout_tick_hint = format_breakout_tick_hint(frame)
+
+        if omit_kline_block:
+            kline_block = (
+                "完整 OHLC 历史、最近 K 线特征及高周期上下文已在本对话前文；"
+                "序号 K1=最新已收盘。"
+            )
+        else:
+            recent_count = min(40, len(frame.bars))
+            feature_count = min(8, len(frame.bars))
+            kline_table = self._render_kline_table(frame, limit=recent_count)
+            feature_table = self._render_kline_feature_table(frame, limit=feature_count)
+            simple_features_block = self._render_simple_market_features_block(frame)
+            external_feature_block = self._render_external_feature_blocks(frame)
+            kline_block = (
+                f"最近 {recent_count} 根 OHLC（K1=最新已收盘）：\n{kline_table}\n\n"
+                f"最近 {feature_count} 根几何特征：\n{feature_table}"
+            )
+            if simple_features_block:
+                kline_block += f"\n\n{simple_features_block}"
+            if external_feature_block:
+                kline_block += f"\n\n{external_feature_block}"
+        if breakout_tick_hint:
+            kline_block += f"\n\n{breakout_tick_hint}"
+
+        return (
+            "## 阶段二交易决策\n\n"
+            "先复核当前结构，再按简洁规则决定下单或等待。"
+            "不得把阶段一诊断当作入场信号；所有价格须能从数据核对。\n\n"
+            f"{stage2_context}\n\n"
+            f"## 阶段一诊断\n```json\n{compact_s1}\n```\n\n"
+            f"## 当前价格数据\n{kline_block}\n\n"
+            "输出满足结构、独立理由与风险回报条件的最简 JSON；无法确认时用不下单。"
+        )
 
     def _build_stage2_user_prompt(
         self,
@@ -1682,8 +1908,21 @@ class PromptAssembler:
         enable_next_bar_prediction: bool = False,
         omit_kline_block: bool = False,
         structure_flip_cooldown_bars: int = 3,
+        analysis_mode: str = "original",
     ) -> str:
         """Build the Stage 2 task turn for standalone or prefix-chain mode."""
+        if _is_compact_two_stage_mode(analysis_mode):
+            return self._build_compact_stage2_user_prompt(
+                frame=frame,
+                stage1_json=stage1_json,
+                experience_entries=experience_entries,
+                decision_stance=decision_stance,
+                previous_record=previous_record,
+                enable_next_bar_prediction=enable_next_bar_prediction,
+                omit_kline_block=omit_kline_block,
+                structure_flip_cooldown_bars=structure_flip_cooldown_bars,
+            )
+
         from pa_agent.ai.decision_continuity import (
             build_continuity_context,
             render_continuity_prompt_block,
@@ -1817,9 +2056,11 @@ class PromptAssembler:
         self,
         strategy_files: list[str],
         experience_entries: list[Any],
+        *,
+        analysis_mode: str = "original",
     ) -> str:
         """Return the shared system prompt used by Stage 2 requests."""
-        return self._build_stage2_system_prompt()
+        return self._build_stage2_system_prompt(analysis_mode)
 
     @staticmethod
     def _compact_stage1_for_stage2(stage1_json: dict) -> dict:

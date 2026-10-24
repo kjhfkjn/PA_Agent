@@ -15,6 +15,7 @@
     "last_tradingview_exchange": "OANDA",
     "last_symbol": "XAUUSDm",
     "last_timeframe": "15m",
+    "analysis_mode": "original",
     "decision_flow_auto_play": true,
     "decision_flow_play_seconds": 50,
     "incremental_max_new_bars": 10,

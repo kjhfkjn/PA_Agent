@@ -95,6 +95,8 @@ class GeneralSettings(BaseModel):
     last_tradingview_exchange: str = ""
     last_symbol: str = "XAUUSDm"
     last_timeframe: str = "15m"
+    #: LLM prompt path: original=legacy full strategy tree, compact_two_stage=short PA/ICT flow.
+    analysis_mode: Literal["original", "optimized", "compact_two_stage"] = "original"
     decision_flow_auto_play: bool = True
     decision_flow_play_seconds: int = 50
     #: 阶段二给出限价/突破/市价单时：警报音、弹窗，并自动切到「决策」页（跳过决策树可视化演示）

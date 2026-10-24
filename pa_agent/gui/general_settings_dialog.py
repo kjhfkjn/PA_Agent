@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 
 from pa_agent.config.settings import Settings, save_settings
 from pa_agent.config.paths import SETTINGS_JSON_PATH
+from pa_agent.gui.analysis_modes import analysis_mode_choices
 
 
 class GeneralSettingsDialog(QDialog):
@@ -128,6 +129,15 @@ class GeneralSettingsDialog(QDialog):
         # ── 分析行为 ──────────────────────────────────────────────────────────
         analysis_group = QGroupBox("分析行为")
         analysis_form = QFormLayout(analysis_group)
+
+        self._analysis_mode_combo = QComboBox()
+        for key, label in analysis_mode_choices():
+            self._analysis_mode_combo.addItem(label, key)
+        self._analysis_mode_combo.setToolTip(
+            "策略树模式沿用原有完整提示词；精简两阶段使用短 PA/ICT 提示词，"
+            "仍输出校验所需的决策路径并保留策略树可视化。"
+        )
+        analysis_form.addRow("LLM 分析模式:", self._analysis_mode_combo)
 
         self._analysis_bar_count_spin = QSpinBox()
         self._analysis_bar_count_spin.setRange(2, 5_000)
@@ -259,6 +269,12 @@ class GeneralSettingsDialog(QDialog):
         self._enable_next_bar_check.blockSignals(False)
 
         self._analysis_bar_count_spin.setValue(g.analysis_bar_count)
+        analysis_mode = str(getattr(g, "analysis_mode", "original") or "original")
+        if analysis_mode == "optimized":
+            analysis_mode = "original"
+        analysis_mode_idx = self._analysis_mode_combo.findData(analysis_mode)
+        if analysis_mode_idx >= 0:
+            self._analysis_mode_combo.setCurrentIndex(analysis_mode_idx)
         self._incremental_max_new_bars_spin.setValue(
             int(getattr(g, "incremental_max_new_bars", 10))
         )
@@ -299,6 +315,7 @@ class GeneralSettingsDialog(QDialog):
         g.alert_on_order_opportunity = self._alert_on_order_check.isChecked()
         g.enable_next_bar_prediction = self._enable_next_bar_check.isChecked()
 
+        g.analysis_mode = self._analysis_mode_combo.currentData()
         g.analysis_bar_count = self._analysis_bar_count_spin.value()
         g.incremental_max_new_bars = self._incremental_max_new_bars_spin.value()
         g.keep_analysis = self._keep_analysis_check.isChecked()
