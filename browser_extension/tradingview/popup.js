@@ -4,10 +4,22 @@ const statusText = (message, bad = false) => {
   el("message").style.color = bad ? "var(--bad)" : "var(--muted)";
 };
 const request = (type, extra = {}) => new Promise((resolve) => chrome.runtime.sendMessage({ type, ...extra }, resolve));
+const toLocalInput = (time) => {
+  if (!Number.isFinite(Number(time))) return "";
+  const date = new Date(Number(time));
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
 const paint = (state) => {
   const data = state.latest || {};
   const diagnostics = data.diagnostics || {};
   el("enabled").checked = !!state.enabled;
+  el("autoCutoff").checked = state.autoCutoff !== false;
+  el("historyCutoff").disabled = el("autoCutoff").checked;
+  if (el("autoCutoff").checked) {
+    const detectedCutoff = data.cutoffTime ?? state.bridge?.historyCutoff;
+    if (detectedCutoff) el("historyCutoff").value = toLocalInput(detectedCutoff);
+  }
   el("barCount").textContent = diagnostics.accepted ?? data.bars?.length ?? "—";
   el("rejected").textContent = diagnostics.rejected ?? "—";
   el("duplicates").textContent = diagnostics.duplicates ?? "—";
@@ -51,10 +63,8 @@ el("captureNow").addEventListener("click", async () => {
   button.disabled = false;
   if (!result?.ok) statusText(result?.error || "同步失败", true);
   else {
-    const cutoff = el("historyCutoff").value;
-    statusText(cutoff
-      ? `已同步 ${result.data.diagnostics.accepted} 根候选 K 线；截止 ${cutoff}，PA Agent 末根 K 线见上方。`
-      : `已同步 ${result.data.diagnostics.accepted} 根 K 线；未设历史截止时间，PA Agent 会显示最新 K 线。`);
+    const cutoff = result.data.cutoffTime ? new Date(result.data.cutoffTime).toLocaleString() : "最新数据";
+    statusText(`已同步 ${result.data.diagnostics.accepted} 根候选 K 线；自动截止：${cutoff}，PA Agent 末根 K 线见上方。`);
   }
   await refresh();
 });
@@ -69,10 +79,21 @@ for (const id of ["symbolFilter", "timeframeFilter"]) {
 el("historyCutoff").addEventListener("change", () => {
   chrome.storage.local.set({ historyCutoff: el("historyCutoff").value });
 });
-chrome.storage.local.get(["symbolFilter", "timeframeFilter", "historyCutoff"], (values) => {
+el("autoCutoff").addEventListener("change", async () => {
+  const autoCutoff = el("autoCutoff").checked;
+  el("historyCutoff").disabled = autoCutoff;
+  chrome.storage.local.set({ autoCutoff });
+  statusText(autoCutoff ? "将自动使用图表最新 K 线作为截止点。" : "已关闭自动截止；请指定历史时间，或留空使用最新数据。");
+  const result = await request("PA_AGENT_CAPTURE_NOW", { historyCutoff: el("historyCutoff").value });
+  if (!result?.ok) statusText(result?.error || "同步失败", true);
+  await refresh();
+});
+chrome.storage.local.get(["symbolFilter", "timeframeFilter", "historyCutoff", "autoCutoff"], (values) => {
   if (values.symbolFilter) el("symbolFilter").value = values.symbolFilter;
   if (values.timeframeFilter) el("timeframeFilter").value = values.timeframeFilter;
   if (values.historyCutoff) el("historyCutoff").value = values.historyCutoff;
+  el("autoCutoff").checked = values.autoCutoff !== false;
+  el("historyCutoff").disabled = el("autoCutoff").checked;
 });
 refresh();
 setInterval(refresh, 2000);

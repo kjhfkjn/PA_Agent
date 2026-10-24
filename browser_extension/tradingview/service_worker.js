@@ -3,6 +3,7 @@ const ALARM = "pa-agent-capture";
 let bridgeToken = "";
 let latest = { diagnostics: {}, symbol: "", resolution: "", receivedAt: 0, error: "" };
 let enabled = false;
+const lastObservedBarByChart = new Map();
 
 const sendBridge = async (path, payload) => {
   if (!bridgeToken) {
@@ -43,21 +44,25 @@ const queryActiveChart = async () => {
   return { tab, received };
 };
 
-const capture = async (explicitHistoryCutoff) => {
-  const { tab, received } = await queryActiveChart();
+const sendReceivedSnapshot = async (tab, received, explicitHistoryCutoff) => {
   latest = { ...received, receivedAt: Date.now(), error: "" };
   if (!received.bars?.length) throw new Error("尚未收到包含有效 K 线的图表数据包；悬停 OHLC 不会被当作历史数据");
-  const filters = await chrome.storage.local.get(["symbolFilter", "timeframeFilter"]);
-  const stored = await chrome.storage.local.get(["historyCutoff"]);
-  const historyCutoff = explicitHistoryCutoff === undefined
-    ? stored.historyCutoff
-    : explicitHistoryCutoff;
-  const cutoffTime = historyCutoff ? new Date(historyCutoff).getTime() : null;
-  if (historyCutoff && !Number.isFinite(cutoffTime)) {
+  const stored = await chrome.storage.local.get(["symbolFilter", "timeframeFilter", "historyCutoff", "autoCutoff"]);
+  const autoCutoff = stored.autoCutoff !== false;
+  const manualCutoff = explicitHistoryCutoff === undefined ? stored.historyCutoff : explicitHistoryCutoff;
+  const newest = received.bars.reduce((best, bar) => Number(bar?.time) > Number(best?.time) ? bar : best, null);
+  let cutoffTime = null;
+  if (autoCutoff && newest) {
+    cutoffTime = Number(newest.time);
+    if (cutoffTime < 100000000000) cutoffTime *= 1000;
+  } else if (manualCutoff) {
+    cutoffTime = new Date(manualCutoff).getTime();
+  }
+  if (cutoffTime !== null && (!Number.isFinite(cutoffTime) || cutoffTime <= 0)) {
     throw new Error("历史截止时间无效，请重新选择日期和时间");
   }
-  const symbolFilter = String(filters.symbolFilter ?? "MES!").toUpperCase();
-  const timeframeFilter = String(filters.timeframeFilter ?? "5");
+  const symbolFilter = String(stored.symbolFilter ?? "MES!").toUpperCase();
+  const timeframeFilter = String(stored.timeframeFilter ?? "5");
   const symbol = String(received.symbol || "").toUpperCase().split(":").pop().replace("1!", "!");
   if (symbolFilter !== "*" && symbol !== symbolFilter) {
     throw new Error(`当前图表 ${symbol} 不符合品种过滤 ${symbolFilter}`);
@@ -74,13 +79,19 @@ const capture = async (explicitHistoryCutoff) => {
     cutoffTime,
     diagnostics: received.diagnostics
   });
+  latest = { ...latest, cutoffTime, cutoffMode: autoCutoff ? "auto" : (manualCutoff ? "manual" : "latest") };
   return latest;
+};
+
+const capture = async (explicitHistoryCutoff) => {
+  const { tab, received } = await queryActiveChart();
+  return sendReceivedSnapshot(tab, received, explicitHistoryCutoff);
 };
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type === "PA_AGENT_POPUP_STATE") {
     Promise.all([
-      chrome.storage.local.get(["enabled"]),
+      chrome.storage.local.get(["enabled", "autoCutoff"]),
       fetch(`${BRIDGE}/api/v1/status`, { cache: "no-store" }).then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const value = await response.json();
@@ -89,6 +100,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       }).catch((error) => ({ status: null, error: error.message }))
     ]).then(([values, bridge]) => respond({
       enabled: !!values.enabled,
+      autoCutoff: values.autoCutoff !== false,
       latest,
       bridge: bridge.status,
       bridgeError: bridge.error
@@ -118,6 +130,23 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (message?.type === "PA_AGENT_PAGE_READER" && sender.tab?.url?.includes("tradingview.com/chart/")) {
     latest = { ...message.payload, receivedAt: Date.now(), error: "" };
+    const rows = message.payload?.bars || [];
+    const newest = rows.reduce((best, bar) => Number(bar?.time) > Number(best?.time) ? bar : best, null);
+    if (!newest || !sender.tab?.id) return;
+    const key = `${sender.tab.id}|${message.payload.symbol}|${message.payload.resolution}`;
+    const currentTime = Number(newest.time);
+    const previousTime = lastObservedBarByChart.get(key);
+    lastObservedBarByChart.set(key, currentTime);
+    // A new bar timestamp means TradingView has advanced past the previous
+    // candle close. Push immediately; the alarm remains a recovery/update path.
+    if (previousTime !== currentTime) {
+      chrome.storage.local.get(["enabled"], (values) => {
+        enabled = !!values.enabled;
+        if (!enabled) return;
+        sendReceivedSnapshot({ id: sender.tab.id, url: sender.tab.url }, message.payload)
+          .catch((error) => { latest.error = error.message; });
+      });
+    }
   }
 });
 
@@ -130,4 +159,7 @@ chrome.runtime.onStartup.addListener(() => chrome.storage.local.get(["enabled"],
 }));
 chrome.runtime.onInstalled.addListener(() => chrome.storage.local.get(["enabled"], (values) => {
   enabled = !!values.enabled;
+  chrome.storage.local.get(["autoCutoff"], (stored) => {
+    if (stored.autoCutoff === undefined) chrome.storage.local.set({ autoCutoff: true });
+  });
 }));
