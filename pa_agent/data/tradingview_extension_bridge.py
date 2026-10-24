@@ -196,6 +196,17 @@ class TradingViewExtensionBridge:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            key = (
+                _normalize_symbol(self._desired_symbol),
+                _normalize_timeframe(self._desired_timeframe),
+            )
+            snapshot = self._snapshots.get(key)
+            rows = snapshot["bars"] if snapshot else {}
+            effective_rows = (
+                {ts: value for ts, value in rows.items() if ts <= self._cutoff_time_ms}
+                if self._cutoff_time_ms is not None
+                else rows
+            )
             return {
                 "ok": True,
                 "token": self._token,
@@ -208,6 +219,9 @@ class TradingViewExtensionBridge:
                 "desiredSymbol": self._desired_symbol,
                 "desiredTimeframe": self._desired_timeframe,
                 "barCount": sum(len(item["bars"]) for item in self._snapshots.values()),
+                "historyCutoff": self._cutoff_time_ms,
+                "displayBarCount": len(effective_rows),
+                "displayLastBarTime": max(effective_rows) if effective_rows else None,
             }
 
     def set_subscription(self, symbol: str, timeframe: str) -> None:

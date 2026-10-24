@@ -49,6 +49,10 @@ const capture = async () => {
   if (!received.bars?.length) throw new Error("尚未收到包含有效 K 线的图表数据包；悬停 OHLC 不会被当作历史数据");
   const filters = await chrome.storage.local.get(["symbolFilter", "timeframeFilter"]);
   const { historyCutoff } = await chrome.storage.local.get(["historyCutoff"]);
+  const cutoffTime = historyCutoff ? new Date(historyCutoff).getTime() : null;
+  if (historyCutoff && !Number.isFinite(cutoffTime)) {
+    throw new Error("历史截止时间无效，请重新选择日期和时间");
+  }
   const symbolFilter = String(filters.symbolFilter ?? "MES!").toUpperCase();
   const timeframeFilter = String(filters.timeframeFilter ?? "5");
   const symbol = String(received.symbol || "").toUpperCase().split(":").pop().replace("1!", "!");
@@ -64,9 +68,7 @@ const capture = async () => {
     symbol: received.symbol,
     resolution: received.resolution,
     bars: received.bars,
-    cutoffTime: historyCutoff
-      ? new Date(historyCutoff).getTime()
-      : null,
+    cutoffTime,
     diagnostics: received.diagnostics
   });
   return latest;
