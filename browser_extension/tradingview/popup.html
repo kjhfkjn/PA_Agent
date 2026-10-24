@@ -32,6 +32,7 @@
     <section class="card controls">
       <label>品种过滤<input id="symbolFilter" value="MES!" placeholder="例如 MES! 或 *"></label>
       <label>周期过滤<select id="timeframeFilter"><option value="*">全部周期</option><option value="1">1 分钟</option><option value="3">3 分钟</option><option value="5" selected>5 分钟</option><option value="15">15 分钟</option><option value="30">30 分钟</option><option value="45">45 分钟</option><option value="60">1 小时</option><option value="120">2 小时</option><option value="180">3 小时</option><option value="240">4 小时</option><option value="D">日线</option><option value="W">周线</option><option value="M">月线</option></select></label>
+      <label>历史数据截止时间<input id="historyCutoff" type="datetime-local" step="60"><small>按本机时区填写回放当前停留时间；留空时使用最新 K 线</small></label>
       <button id="captureNow" class="primary">立即读取并同步</button>
     </section>
     <p id="message" class="message" role="status">启动 PA Agent 并打开 TradingView 图表后即可采集。</p>

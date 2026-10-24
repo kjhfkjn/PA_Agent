@@ -54,9 +54,13 @@ for (const id of ["symbolFilter", "timeframeFilter"]) {
     });
   });
 }
-chrome.storage.local.get(["symbolFilter", "timeframeFilter"], (values) => {
+el("historyCutoff").addEventListener("change", () => {
+  chrome.storage.local.set({ historyCutoff: el("historyCutoff").value });
+});
+chrome.storage.local.get(["symbolFilter", "timeframeFilter", "historyCutoff"], (values) => {
   if (values.symbolFilter) el("symbolFilter").value = values.symbolFilter;
   if (values.timeframeFilter) el("timeframeFilter").value = values.timeframeFilter;
+  if (values.historyCutoff) el("historyCutoff").value = values.historyCutoff;
 });
 refresh();
 setInterval(refresh, 2000);

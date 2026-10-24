@@ -1,6 +1,8 @@
 # PA Agent TradingView Edge 扩展
 
-该 Manifest V3 扩展弹窗提供采集开关、品种/周期过滤、立即采集、后端连接状态、有效 K 线数、解析数据包数和过滤诊断。扩展在 TradingView 页面早期挂接 WebSocket `message` 事件，只解析 `timescale_update`、`du` 等图表序列更新包中的 K 线字段；不会转发原始数据包。扩展会校验 OHLCV、去重、排序并按 GUI 过滤，然后发送到 PA Agent 的本机回环服务 `127.0.0.1:18765`。图例当前悬停的 OHLC 不会被当作历史序列发送。
+该 Manifest V3 扩展弹窗提供采集开关、品种/周期过滤、历史数据截止时间、立即采集、后端连接状态、有效 K 线数、解析数据包数和过滤诊断。扩展在 TradingView 页面早期挂接 WebSocket `message` 事件，只解析 `timescale_update`、`du` 等图表序列更新包中的 K 线字段；不会转发原始数据包。扩展会校验 OHLCV、去重、排序并按 GUI 过滤，然后发送到 PA Agent 的本机回环服务 `127.0.0.1:18765`。图例当前悬停的 OHLC 不会被当作历史序列发送。
+
+使用 Bar Replay 时，将“历史数据截止时间”设为回放当前停留 K 线的时间并点击“立即读取并同步”。PA Agent 会仅向 GUI 提供截止时间及之前的 K 线；留空则仍使用最新 K 线。时间按本机时区解释。
 
 ## 加载到 Edge
 

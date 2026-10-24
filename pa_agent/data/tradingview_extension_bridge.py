@@ -67,6 +67,7 @@ class TradingViewExtensionBridge:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+        self._cutoff_time_ms: int | None = None
         self._last_seen: float | None = None
         self._page_url = ""
         self._browser_symbol = ""
@@ -264,6 +265,12 @@ class TradingViewExtensionBridge:
                 "bars": dict(sorted(bars.items())[-MAX_BARS:]),
                 "receivedAt": self._last_seen,
             }
+            try:
+                raw_cutoff = payload.get("cutoffTime")
+                cutoff = int(raw_cutoff) if raw_cutoff is not None else None
+                self._cutoff_time_ms = cutoff if cutoff and cutoff > 0 else None
+            except (TypeError, ValueError, OverflowError):
+                self._cutoff_time_ms = None
         logger.debug("Received %d TradingView bars for %s %s", len(bars), symbol, resolution)
 
     def get_snapshot(self, symbol: str, timeframe: str, count: int) -> list[tuple[int, tuple[float, ...]]]:
@@ -272,6 +279,7 @@ class TradingViewExtensionBridge:
             snapshot = self._snapshots.get(key)
             browser_symbol = self._browser_symbol
             browser_resolution = self._browser_resolution
+            cutoff_time_ms = self._cutoff_time_ms
         if snapshot is None:
             if browser_symbol:
                 detail = f"Edge 正在捕获 {browser_symbol} {browser_resolution}"
@@ -279,4 +287,8 @@ class TradingViewExtensionBridge:
                 detail = "等待 Edge 扩展连接 TradingView 图表"
             raise RuntimeError(detail)
         rows = snapshot["bars"]
+        if cutoff_time_ms is not None:
+            rows = {ts: value for ts, value in rows.items() if ts <= cutoff_time_ms}
+            if not rows:
+                raise RuntimeError("所选历史截止时间之前没有已捕获的 K 线；请先在 TradingView 加载该历史区间")
         return list(rows.items())[-max(1, int(count)):][::-1]
