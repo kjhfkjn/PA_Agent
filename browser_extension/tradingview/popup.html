@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PA Agent · TradingView</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div class="brand-mark">PA</div>
+      <div><h1>PA Agent</h1><p>TradingView 图表采集</p></div>
+      <span id="statusDot" class="dot"></span>
+    </header>
+    <section class="card connection">
+      <div class="row"><span>本机后端</span><strong id="backendStatus">检测中</strong></div>
+      <div class="row"><span>当前图表</span><strong id="chartStatus">检测中</strong></div>
+      <div class="row"><span>目标品种 / 周期</span><strong id="target">MES! · 5m</strong></div>
+    </section>
+    <section class="capture">
+      <div><h2>图表采集</h2><p id="captureHint">解析图表数据包，过滤并同步有效 K 线</p></div>
+      <label class="switch"><input id="enabled" type="checkbox"><span></span></label>
+    </section>
+    <section class="metrics">
+      <div class="metric"><span>有效 K 线</span><strong id="barCount">—</strong></div>
+      <div class="metric"><span>最近更新</span><strong id="lastUpdate">—</strong></div>
+      <div class="metric"><span>剔除无效</span><strong id="rejected">—</strong></div>
+      <div class="metric"><span>去重更新</span><strong id="duplicates">—</strong></div>
+      <div class="metric"><span>解析图表数据包</span><strong id="packetCount">—</strong></div>
+    </section>
+    <section class="card controls">
+      <label>品种过滤<input id="symbolFilter" value="MES!" placeholder="例如 MES! 或 *"></label>
+      <label>周期过滤<select id="timeframeFilter"><option value="*">全部周期</option><option value="1">1 分钟</option><option value="3">3 分钟</option><option value="5" selected>5 分钟</option><option value="15">15 分钟</option><option value="30">30 分钟</option><option value="45">45 分钟</option><option value="60">1 小时</option><option value="120">2 小时</option><option value="180">3 小时</option><option value="240">4 小时</option><option value="D">日线</option><option value="W">周线</option><option value="M">月线</option></select></label>
+      <button id="captureNow" class="primary">立即读取并同步</button>
+    </section>
+    <p id="message" class="message" role="status">启动 PA Agent 并打开 TradingView 图表后即可采集。</p>
+    <footer>数据仅发送至本机 127.0.0.1:18765</footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

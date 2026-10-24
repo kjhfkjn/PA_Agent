@@ -107,12 +107,20 @@ def normalize_gold_symbol_for_kind(kind: str, symbol: str) -> str:
             return A_SHARE_DEFAULT_SYMBOL
         return code
     if kind == "tradingview":
+        # Continuous futures tickers contain digits plus a trailing bang
+        # (for example MES1!, ES1!, NQ1!). Treat them as TradingView symbols
+        # before the numeric HK ticker normalization below.
+        tv_symbol = sym.upper()
+        if tv_symbol.endswith("!") and tv_symbol[:-1].replace(".", "").isalnum():
+            return tv_symbol
         code = normalize_ashare_tv_code(sym)
         if _is_ashare_tv_code(code):
             return code
         hk = normalize_hk_tv_code(sym)
         if _is_hk_tv_code(hk):
             return hk
+        if not sym or sym.upper() in {"XAUUSD", "GOLD", "XAUUSDM"}:
+            return "MES!"
     if not sym or is_likely_crypto_symbol(sym):
         return GOLD_TV_SYMBOL if kind == "tradingview" else GOLD_MT5_SYMBOL
     if kind == "tradingview" and sym.lower().endswith("m") and len(sym) > 2:
@@ -417,6 +425,12 @@ def resolve_tv_pair(
                 return ex_try, sym_try, False
         # User's exchange not in plan; trust them and pass through
         return ex_in, sym, False
+
+    # Continuous futures tickers such as MES1! are neither numeric stock
+    # codes nor Hong Kong tickers. Preserve them before the digit extractor
+    # in the HK-code resolver can reduce them to "1".
+    if upper.endswith("!") and upper[:-1].replace(".", "").isalnum():
+        return ex_in, upper, False
 
     # 3. A-share numeric codes
     ashare = resolve_tv_ashare_pair(exchange, symbol)

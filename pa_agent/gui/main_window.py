@@ -1583,20 +1583,22 @@ class MainWindow(QMainWindow):
 
         # For TradingView, probe connectivity on-demand (not at startup)
         if self._current_data_source_kind() == "tradingview":
-            from pa_agent.data.tradingview_connectivity import check_tradingview_connectivity
-            ok, detail = check_tradingview_connectivity()
-            if not ok:
-                if detail:
-                    logger.info("TradingView unreachable: %s", detail)
-                from pa_agent.gui.tv_connectivity_dialog import show_tv_connectivity_blocked_dialog
-                choice = show_tv_connectivity_blocked_dialog(self)
-                if choice == "mt5":
-                    self._select_data_source_kind("mt5", switch=True)
-                return
-            # Brief pause to let the probe's WebSocket fully disconnect before
-            # the refresh loop opens its own connection (avoids TV rate-limiting)
-            import time as _time
-            _time.sleep(1.5)
+            from pa_agent.data.tradingview_extension_source import TradingViewExtensionSource
+            if not isinstance(data_source, TradingViewExtensionSource):
+                from pa_agent.data.tradingview_connectivity import check_tradingview_connectivity
+                ok, detail = check_tradingview_connectivity()
+                if not ok:
+                    if detail:
+                        logger.info("TradingView unreachable: %s", detail)
+                    from pa_agent.gui.tv_connectivity_dialog import show_tv_connectivity_blocked_dialog
+                    choice = show_tv_connectivity_blocked_dialog(self)
+                    if choice == "mt5":
+                        self._select_data_source_kind("mt5", switch=True)
+                    return
+                # Brief pause to let the probe's WebSocket fully disconnect before
+                # the refresh loop opens its own connection (avoids TV rate-limiting)
+                import time as _time
+                _time.sleep(1.5)
         # Stop any existing loop first so we can start fresh.
         # Reset the keep-analysis sentinel so a stale closed-bar ts from a
         # previous session / interrupted fetch does not immediately fire a
@@ -4177,6 +4179,7 @@ class MainWindow(QMainWindow):
             self._cancel_analysis_worker()
             self._cancel_snapshot_fetch_worker()
             self._stop_refresh_loop()
+            self._disconnect_data_source(getattr(self._ctx, "data_source", None))
         except RuntimeError as exc:
             logger.debug("Shutdown cleanup skipped: %s", exc)
         super().closeEvent(event)

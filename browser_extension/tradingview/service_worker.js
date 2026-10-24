@@ -1,0 +1,124 @@
+const BRIDGE = "http://127.0.0.1:18765";
+const ALARM = "pa-agent-capture";
+let bridgeToken = "";
+let latest = { diagnostics: {}, symbol: "", resolution: "", receivedAt: 0, error: "" };
+let enabled = false;
+
+const sendBridge = async (path, payload) => {
+  if (!bridgeToken) {
+    const response = await fetch(`${BRIDGE}/api/v1/status`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`PA Agent 状态请求失败 (${response.status})`);
+    const status = await response.json();
+    bridgeToken = status.token;
+  }
+  const response = await fetch(`${BRIDGE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-PA-Token": bridgeToken },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error(`PA Agent 接收失败 (${response.status})`);
+  return response.json();
+};
+
+const queryActiveChart = async () => {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.id || !/^https:\/\/[^/]*tradingview\.com\/chart\//.test(tab.url || "")) {
+    throw new Error("请先切换到 TradingView 图表标签页");
+  }
+  const received = await new Promise((resolve) => {
+    const listener = (message, sender) => {
+      if (message?.type === "PA_AGENT_CHART_DATA" && sender.tab?.id === tab.id) {
+        chrome.runtime.onMessage.removeListener(listener);
+        resolve(message.payload);
+      }
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    chrome.tabs.sendMessage(tab.id, { type: "PA_AGENT_POLL" }).catch(() => {});
+    setTimeout(() => {
+      chrome.runtime.onMessage.removeListener(listener);
+      resolve(null);
+    }, 900);
+  });
+  if (!received) throw new Error("尚未收到 TradingView 图表数据；请确认图表已加载并重试");
+  return { tab, received };
+};
+
+const capture = async () => {
+  const { tab, received } = await queryActiveChart();
+  latest = { ...received, receivedAt: Date.now(), error: "" };
+  if (!received.bars?.length) throw new Error("尚未收到包含有效 K 线的图表数据包；悬停 OHLC 不会被当作历史数据");
+  const filters = await chrome.storage.local.get(["symbolFilter", "timeframeFilter"]);
+  const symbolFilter = String(filters.symbolFilter ?? "MES!").toUpperCase();
+  const timeframeFilter = String(filters.timeframeFilter ?? "5");
+  const symbol = String(received.symbol || "").toUpperCase().split(":").pop().replace("1!", "!");
+  if (symbolFilter !== "*" && symbol !== symbolFilter) {
+    throw new Error(`当前图表 ${symbol} 不符合品种过滤 ${symbolFilter}`);
+  }
+  if (timeframeFilter !== "*" && String(received.resolution) !== timeframeFilter) {
+    throw new Error(`当前图表周期 ${received.resolution} 不符合周期过滤 ${timeframeFilter}`);
+  }
+  await sendBridge("/api/v1/heartbeat", { pageUrl: tab.url, symbol: received.symbol, resolution: received.resolution, diagnostics: received.diagnostics });
+  await sendBridge("/api/v1/klines", {
+    pageUrl: tab.url,
+    symbol: received.symbol,
+    resolution: received.resolution,
+    bars: received.bars,
+    diagnostics: received.diagnostics
+  });
+  return latest;
+};
+
+chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+  if (message?.type === "PA_AGENT_POPUP_STATE") {
+    Promise.all([
+      chrome.storage.local.get(["enabled"]),
+      fetch(`${BRIDGE}/api/v1/status`, { cache: "no-store" }).then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const value = await response.json();
+        bridgeToken = value.token || bridgeToken;
+        return { status: value, error: "" };
+      }).catch((error) => ({ status: null, error: error.message }))
+    ]).then(([values, bridge]) => respond({
+      enabled: !!values.enabled,
+      latest,
+      bridge: bridge.status,
+      bridgeError: bridge.error
+    }));
+    return true;
+  }
+  if (message?.type === "PA_AGENT_SET_ENABLED") {
+    enabled = !!message.enabled;
+    chrome.storage.local.set({ enabled }, () => {
+      if (enabled) {
+        chrome.alarms.create(ALARM, { periodInMinutes: 0.5 });
+        capture().catch((error) => { latest.error = error.message; });
+      } else chrome.alarms.clear(ALARM);
+      respond({ enabled });
+    });
+    return true;
+  }
+  if (message?.type === "PA_AGENT_CAPTURE_NOW") {
+    capture().then((data) => respond({ ok: true, data })).catch((error) => {
+      latest.error = error.message;
+      respond({ ok: false, error: error.message, data: latest });
+    });
+    return true;
+  }
+});
+
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message?.type === "PA_AGENT_PAGE_READER" && sender.tab?.url?.includes("tradingview.com/chart/")) {
+    latest = { ...message.payload, receivedAt: Date.now(), error: "" };
+  }
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === ALARM) capture().catch((error) => { latest.error = error.message; });
+});
+chrome.runtime.onStartup.addListener(() => chrome.storage.local.get(["enabled"], (values) => {
+  enabled = !!values.enabled;
+  if (enabled) chrome.alarms.create(ALARM, { periodInMinutes: 0.5 });
+}));
+chrome.runtime.onInstalled.addListener(() => chrome.storage.local.get(["enabled"], (values) => {
+  enabled = !!values.enabled;
+}));
