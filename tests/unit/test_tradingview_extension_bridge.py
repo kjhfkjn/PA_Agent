@@ -1,6 +1,12 @@
 """Tests for per-symbol/per-timeframe TradingView extension snapshots."""
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
+
+import pytest
+
 from pa_agent.data.tradingview_extension_bridge import TradingViewExtensionBridge
 
 _BASE_MS = 1_700_000_000_000
@@ -109,3 +115,43 @@ def test_status_reports_each_context_snapshot() -> None:
         ("5m", _BASE_MS),
         ("1h", _BASE_MS),
     }
+
+
+def test_backtest_session_id_changes_only_after_disable_and_reenable() -> None:
+    bridge = TradingViewExtensionBridge()
+    assert bridge.status()["backtestSessionId"] is None
+
+    bridge.set_backtest_enabled(True)
+    first_session = bridge.status()["backtestSessionId"]
+    assert isinstance(first_session, str) and first_session
+
+    bridge.set_backtest_enabled(True)
+    assert bridge.status()["backtestSessionId"] == first_session
+
+    bridge.set_backtest_enabled(False)
+    assert bridge.status()["backtestSessionId"] is None
+
+    bridge.set_backtest_enabled(True)
+    assert bridge.status()["backtestSessionId"] != first_session
+
+
+def test_backtest_http_endpoint_rejects_non_boolean_enabled_value() -> None:
+    bridge = TradingViewExtensionBridge(port=0)
+    bridge.start()
+    try:
+        port = bridge._server.server_address[1]
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/backtest",
+            data=json.dumps({"enabled": "false"}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-PA-Token": bridge.status()["token"],
+            },
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=2)
+        assert error.value.code == 400
+        assert bridge.status()["backtestEnabled"] is False
+    finally:
+        bridge.stop()

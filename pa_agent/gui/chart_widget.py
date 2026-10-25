@@ -62,6 +62,8 @@ class ChartWidget(pg.PlotWidget):
         self._sr_items: list[pg.GraphicsItem] = []  # support/resistance level lines
         self._pending_decision: dict | None = None
         self._direction_items: list[pg.GraphicsItem] = []
+        self._backtest_markers: list[dict] = []
+        self._backtest_items: list[pg.GraphicsItem] = []
         self._seq_label_font_pt: int = 11
         self._fit_on_next_render: bool = False
         self._first_frame_fitted: bool = False
@@ -190,6 +192,13 @@ class ChartWidget(pg.PlotWidget):
         self._overlay.clear_lines(self)
         self._clear_direction_marker()
         self._pending_decision = None
+
+    def set_backtest_markers(self, markers: list[dict] | None) -> None:
+        """Show fills and exits on the bars that produced them."""
+        self._backtest_markers = [
+            dict(marker) for marker in (markers or []) if isinstance(marker, dict)
+        ]
+        self._update_backtest_markers()
 
     def set_support_resistance(self, levels: list) -> None:
         """Draw horizontal support/resistance lines from StructureLevel objects.
@@ -348,6 +357,8 @@ class ChartWidget(pg.PlotWidget):
     def reset(self) -> None:
         """Clear all chart items (candles, labels, EMA, overlay lines)."""
         self.clear_decision_overlay()
+        self._backtest_markers.clear()
+        self._clear_backtest_items()
         self._clear_candles_and_labels()
         if self._ema_line is not None:
             self.removeItem(self._ema_line)
@@ -427,6 +438,7 @@ class ChartWidget(pg.PlotWidget):
             self.addItem(self._ema_line)
 
         self._update_direction_marker()
+        self._update_backtest_markers()
 
         if self._fit_on_next_render:
             self._fit_on_next_render = False
@@ -489,6 +501,87 @@ class ChartWidget(pg.PlotWidget):
         for item in self._direction_items:
             self.removeItem(item)
         self._direction_items.clear()
+
+    def _clear_backtest_items(self) -> None:
+        for item in self._backtest_items:
+            self.removeItem(item)
+        self._backtest_items.clear()
+
+    def _update_backtest_markers(self) -> None:
+        """Map persisted replay timestamps onto the chart's newest-first bars."""
+        self._clear_backtest_items()
+        frame = self._latest_frame
+        if frame is None or not frame.bars or not self._backtest_markers:
+            return
+
+        from pa_agent.data.context_timeframes import normalize_timeframe
+        from pa_agent.data.datetime_ts import ts_open_to_ms
+
+        def normalize_symbol(value: object) -> str:
+            return str(value or "").strip().upper().split(":")[-1].replace("1!", "!")
+
+        frame_symbol = normalize_symbol(frame.symbol)
+        frame_timeframe = normalize_timeframe(frame.timeframe)
+        count = len(frame.bars)
+        x_by_ts: dict[int, float] = {}
+        for index, bar in enumerate(frame.bars):
+            try:
+                x_by_ts[int(ts_open_to_ms(bar.ts_open))] = float(count - 1 - index)
+            except (TypeError, ValueError, OverflowError):
+                continue
+
+        colors = {
+            "entry": (63, 185, 80),
+            "target": (88, 166, 255),
+            "exit": (248, 81, 73),
+        }
+        from PyQt6.QtGui import QFont
+
+        for marker in self._backtest_markers:
+            if (
+                normalize_symbol(marker.get("symbol")) != frame_symbol
+                or normalize_timeframe(marker.get("timeframe")) != frame_timeframe
+            ):
+                continue
+            try:
+                bar_ts = int(marker.get("bar_ts_open"))
+                price = float(marker.get("price"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            x_pos = x_by_ts.get(bar_ts)
+            kind = str(marker.get("marker_kind") or "")
+            if x_pos is None or kind not in colors or not math.isfinite(price):
+                continue
+
+            color = colors[kind]
+            point = pg.ScatterPlotItem(
+                x=[x_pos],
+                y=[price],
+                size=10,
+                symbol="o",
+                brush=pg.mkBrush(color),
+                pen=pg.mkPen("#0d1117", width=1),
+            )
+            self.addItem(point, ignoreBounds=True)
+            self._backtest_items.append(point)
+
+            label = str(marker.get("label") or "")
+            if kind == "entry":
+                arrow = "▲" if marker.get("direction") == "做多" else "▼"
+                label = f"{arrow} {label}"
+            text = pg.TextItem(
+                text=label,
+                color=color,
+                anchor=(0.5, 1.35 if kind == "entry" else 0.5),
+                fill=pg.mkBrush("#0d1117"),
+            )
+            font = QFont()
+            font.setPointSize(9)
+            font.setBold(True)
+            text.setFont(font)
+            text.setPos(x_pos, price)
+            self.addItem(text, ignoreBounds=True)
+            self._backtest_items.append(text)
 
     def _update_direction_marker(self) -> None:
         """Draw ▲/▼ at newest bar × entry price for long/short."""

@@ -2554,6 +2554,19 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             return False
 
+    def _backtest_session_id(self) -> str | None:
+        """Current replay session identifier, used to isolate persisted paper trades."""
+        try:
+            data_source = getattr(self._ctx, "data_source", None)
+            status_reader = getattr(data_source, "bridge_status", None)
+            status = status_reader() if callable(status_reader) else status_reader
+            if isinstance(status, dict):
+                value = status.get("backtestSessionId")
+                return str(value) if value else None
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not read backtest session id", exc_info=True)
+        return None
+
     def _check_keep_analysis(self, bars: Any) -> None:
         """Trigger a new analysis round when keep-analysis is enabled and a new bar has closed.
 
@@ -2587,7 +2600,10 @@ class MainWindow(QMainWindow):
                 try:
                     from pa_agent.records.backtest_trade_tracker import BacktestTradeTracker
 
-                    BacktestTradeTracker().process_analysis(previous)
+                    BacktestTradeTracker().process_analysis(
+                        previous,
+                        session_id=self._backtest_session_id(),
+                    )
                     self._backtest_bootstrap_analysis_id = previous_id
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Backtest trade bootstrap failed: %s", exc, exc_info=True)
@@ -4069,7 +4085,15 @@ class MainWindow(QMainWindow):
             try:
                 from pa_agent.records.backtest_trade_tracker import BacktestTradeTracker
 
-                trade_state = BacktestTradeTracker().process_analysis(record)
+                trade_state = BacktestTradeTracker().process_analysis(
+                    record,
+                    session_id=self._backtest_session_id(),
+                )
+                if trade_state:
+                    chart = getattr(self, "_chart_widget", None)
+                    set_markers = getattr(chart, "set_backtest_markers", None)
+                    if callable(set_markers):
+                        set_markers(trade_state.get("chart_markers") or [])
                 self._backtest_bootstrap_analysis_id = str(
                     getattr(getattr(record, "meta", None), "timestamp_local_ms", "") or ""
                 )
@@ -4085,6 +4109,15 @@ class MainWindow(QMainWindow):
                         "tp1": active_trade.get("take_profit_1_hit") if active_trade else False,
                         "tp2": active_trade.get("take_profit_2_hit") if active_trade else False,
                         "sl": active_trade.get("stop_loss_hit") if active_trade else False,
+                        "remaining_size": (
+                            active_trade.get("remaining_size_fraction") if active_trade else None
+                        ),
+                        "realized_points": (
+                            active_trade.get("realized_pnl_points") if active_trade else None
+                        ),
+                        "unrealized_points": (
+                            active_trade.get("unrealized_pnl_points") if active_trade else None
+                        ),
                     },
                 )
             except Exception as exc:  # noqa: BLE001

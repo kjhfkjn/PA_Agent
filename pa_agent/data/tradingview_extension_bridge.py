@@ -11,6 +11,7 @@ import secrets
 import struct
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
@@ -76,6 +77,7 @@ class TradingViewExtensionBridge:
         self._desired_symbol = ""
         self._desired_timeframe = ""
         self._backtest_enabled = False
+        self._backtest_session_id: str | None = None
         self._backtest_updated_at: float | None = None
 
     def start(self) -> None:
@@ -289,7 +291,10 @@ class TradingViewExtensionBridge:
                     if route.endswith("heartbeat"):
                         bridge.accept_heartbeat(payload)
                     elif route.endswith("backtest"):
-                        bridge.set_backtest_enabled(bool(payload.get("enabled")))
+                        enabled_value = payload.get("enabled")
+                        if not isinstance(enabled_value, bool):
+                            raise ValueError("enabled must be a boolean")
+                        bridge.set_backtest_enabled(enabled_value)
                     else:
                         bridge.accept_snapshot(payload)
                 except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -367,6 +372,7 @@ class TradingViewExtensionBridge:
                 "desiredSymbol": self._desired_symbol,
                 "desiredTimeframe": self._desired_timeframe,
                 "backtestEnabled": self._backtest_enabled,
+                "backtestSessionId": self._backtest_session_id,
                 "backtestUpdatedAt": self._backtest_updated_at,
                 "latestEventId": self._next_event_id - 1,
                 "eventSessionId": self._event_session_id,
@@ -405,7 +411,12 @@ class TradingViewExtensionBridge:
     def set_backtest_enabled(self, enabled: bool) -> None:
         """Expose the extension's replay mode to the GUI auto-analysis loop."""
         with self._lock:
-            self._backtest_enabled = bool(enabled)
+            enabled = bool(enabled)
+            if enabled and not self._backtest_enabled:
+                self._backtest_session_id = uuid.uuid4().hex
+            elif not enabled:
+                self._backtest_session_id = None
+            self._backtest_enabled = enabled
             self._backtest_updated_at = time.time()
             self._event_condition.notify_all()
 

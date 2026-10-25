@@ -166,3 +166,66 @@ class TestNoLinesWhenNotTrading:
         chart_widget.clear_decision_overlay()
         assert _count_infinite_lines(chart_widget) == 0
         assert chart_widget._pending_decision is None
+
+    def test_backtest_markers_map_to_matching_candle_timestamp(self, chart_widget):
+        from pa_agent.data.base import IndicatorBundle, KlineBar, KlineFrame
+
+        newest_ts = 1_700_000_000_000
+        bars = tuple(
+            KlineBar(
+                seq=index + 1,
+                ts_open=newest_ts - index * 300_000,
+                open=100.0,
+                high=105.0,
+                low=95.0,
+                close=101.0,
+                volume=10.0,
+                closed=True,
+            )
+            for index in range(3)
+        )
+        frame = KlineFrame(
+            symbol="MES!",
+            timeframe="5m",
+            bars=bars,
+            snapshot_ts_local_ms=newest_ts,
+            indicators=IndicatorBundle(
+                ema20=(100.0, 100.0, 100.0),
+                atr14=(5.0, 5.0, 5.0),
+            ),
+        )
+        chart_widget.set_frame_now(frame)
+        chart_widget.set_backtest_markers([
+            {
+                "marker_kind": "entry",
+                "label": "入场",
+                "price": 100.0,
+                "bar_ts_open": newest_ts - 300_000,
+                "symbol": "MES!",
+                "timeframe": "5",
+                "direction": "做多",
+            },
+            {
+                "marker_kind": "exit",
+                "label": "止损",
+                "price": 95.0,
+                "bar_ts_open": newest_ts - 600_000,
+                "symbol": "MES!",
+                "timeframe": "5m",
+                "direction": "做多",
+            },
+        ])
+
+        assert len(chart_widget._backtest_items) == 4
+        chart_widget.set_backtest_markers([
+            {
+                "marker_kind": "entry",
+                "label": "入场",
+                "price": 100.0,
+                "bar_ts_open": newest_ts,
+                "symbol": "MES!",
+                "timeframe": "15m",
+                "direction": "做多",
+            },
+        ])
+        assert chart_widget._backtest_items == []
