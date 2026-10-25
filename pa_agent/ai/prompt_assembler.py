@@ -393,7 +393,7 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
       "reason": "信号棒质量判断"
     },
     "entry_bar": {
-      "strength": "strong|weak|not_triggered",
+      "strength": "strong|weak|not_triggered（中等强度按 weak）",
       "follow_through": true,
       "still_valid": true,
       "freshness": "fresh|pending|stale|invalid"
@@ -569,6 +569,7 @@ JSON 字符串内不要用英文双引号强调，改用「」或不用引号。
 **§9 逐K信号链与新鲜度硬规则：**
 - §9.0–§9.7 必须引用 `bar_analysis.signal_bar.bar` 与阶段一 `bar_by_bar_summary` 中的对应 K 线；计划型限价时 `signal_bar.bar` 为 null，须在 **§9.0P**（非 §9.0）写明依据；`quality="invalid"`、`pattern="none"`。若限价单/突破单尚未触发，`bar_analysis.entry_bar.bar` 可为 null，但必须设 `strength="not_triggered"`、`freshness="pending"`，并在 9.7 写明“等待触发，尚无入场棒”。
 - **⚠️ 市价单 entry_bar 硬规则**：`order_type="市价单"` 代表基于当前已收盘棒立即入场，**不存在「等待触发」状态**。`entry_bar.bar` 必须填写信号棒（通常为 K1），`strength` 设为 `strong` 或 `weak`，`freshness` 设为 `fresh`，`follow_through` 设为 `true`。**禁止**市价单将 `entry_bar.bar` 填为 null 或将 `freshness` 填为 `pending`——这会导致校验失败。
+- `entry_bar.strength` 只允许 `strong`、`weak`、`not_triggered`；若中等/一般强度，填 `weak`，不要输出 `medium` 或 `moderate`。
 - **K 线序号约定**：K 数字越大表示越早的已收盘棒（K8 早于 K1）。信号棒通常比入场棒更早，故 signal_bar 的 K 序号 **大于** entry_bar 的 K 序号（例：K3 信号 → K1 入场）。
 - 如果信号棒之后已经出现 2–3 根无跟随、反向强 K、或 `entry_bar.freshness=stale|invalid`，不得继续把旧信号当作新的突破单依据。
 - 如果最新 K1 是 doji、弱入场棒、无跟随或反向确认，应降低 trade_confidence；只有前一未回补突破缺口回撤例外完整成立时，才继续 §10 评估限价单。
@@ -668,6 +669,7 @@ _STAGE1_COMPACT_OUTPUT_REMINDER = """\
 - role 用 structure/signal/entry/confirmation/noise/trap/climax/test；context_effect 用 strengthens_bull、weakens_bull、strengthens_bear、weakens_bear、weakened_bull、weakened_bear、neutral 或 transition；follow_through 用 yes/no/pending/failed；trapped_side 用 bulls/bears/both/none/unknown。
 - `gate_trace` 只写 1.2、1.3、2.1、2.2、2.5 五个节点；每项含 node_id、question、answer、reason、bar_range。1.2 写周期，2.1 写近期方向，2.2 写高低周期关系；最后一项说明是否进入阶段二。其余三个节点由程序补入。
 - 仅周期无法识别或市场极端混乱时 gate_result=wait/unknown；否则为 proceed。spike 时填写 spike_stage；market_phase=transitioning 时填写 transition_risk。
+- `transition_risk` 必须且只能填 `high`、`medium`、`low` 之一；风险说明写入 `risk_warning`，不要把解释句放进该字段。
 - 支撑/阻力各最多 3 项，只列有效结构位；证据不足填空数组。不得把 ICT FVG 与突破缺口重复计为两条证据。
 """.strip()
 

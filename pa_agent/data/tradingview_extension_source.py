@@ -59,6 +59,15 @@ class TradingViewExtensionSource(TradingViewSource):
         """Forward ephemeral LLM stream updates to the browser extension."""
         self._bridge.publish_analysis_stream(**payload)
 
+    def backtest_sync_context(
+        self,
+        symbol: str,
+        timeframe: str,
+        bar_time: int,
+    ) -> dict[str, Any] | None:
+        """Return the extension sync identity associated with an analyzed bar."""
+        return self._bridge.snapshot_sync_context(symbol, timeframe, bar_time)
+
     def unsubscribe(self) -> None:
         self._symbol = ""
         self._timeframe = ""

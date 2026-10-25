@@ -13,12 +13,17 @@ window.addEventListener(EVENT, (event) => {
   if (!sendTimer) sendTimer = setTimeout(publishLatest, 350);
 });
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type !== "PA_AGENT_POLL") return;
   window.dispatchEvent(new Event("pa-agent-tv-reader-poll"));
+  // The page reader handles the poll event in the main world and publishes
+  // its current snapshot through the window event above. Keep the short
+  // settling delay used by the previous relay, then return that snapshot
+  // through the request's response channel for reliable retries.
   setTimeout(() => {
-    chrome.runtime.sendMessage({ type: "PA_AGENT_CHART_DATA", payload: latest }).catch(() => {});
+    respond({ type: "PA_AGENT_CHART_DATA", payload: latest });
   }, 80);
+  return true;
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {

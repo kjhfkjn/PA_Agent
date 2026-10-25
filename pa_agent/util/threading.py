@@ -29,7 +29,12 @@ class CancelToken:
 
 
 class OrchestratorEvent(Enum):
-    """Events emitted by TwoStageOrchestrator during a submission."""
+    """Events emitted by analysis strategies during a submission.
+
+    Stage 1 and Stage 2 names are retained for compatibility with the current
+    GUI and saved-record flow; future strategy implementations should map
+    their milestones to these events until that contract becomes generic.
+    """
     Stage1Started = auto()
     Stage1Retry = auto()
     Stage1Done = auto()

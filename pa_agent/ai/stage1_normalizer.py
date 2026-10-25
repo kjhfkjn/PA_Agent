@@ -86,13 +86,51 @@ _SIGNAL_BAR_QUALITY_ALIASES: dict[str, str] = {
 
 # Model often uses "moderate" as a synonym for "medium" in transition_risk.
 _TRANSITION_RISK_ALIASES: dict[str, str] = {
+    "high": "high",
+    "medium": "medium",
+    "low": "low",
     "moderate": "medium",
     "moderately_high": "high",
     "moderately_low": "low",
     "moderate_high": "high",
     "moderate_low": "low",
     "mid": "medium",
+    "高风险": "high",
+    "较高": "high",
+    "偏高": "high",
+    "中等": "medium",
+    "中": "medium",
+    "低风险": "low",
+    "较低": "low",
+    "偏低": "low",
 }
+
+_TRANSITION_RISK_HIGH_CUES = (
+    "high risk",
+    "risk is high",
+    "高风险",
+    "风险较高",
+    "风险偏高",
+    "风险很大",
+    "风险较大",
+    "高危",
+    "极高",
+    "严重",
+    "未存活",
+    "失败回落",
+    "突破失败",
+    "高潮后回撤",
+)
+_TRANSITION_RISK_LOW_CUES = (
+    "low risk",
+    "risk is low",
+    "低风险",
+    "风险较低",
+    "风险偏低",
+    "风险不高",
+    "风险较小",
+    "风险很低",
+)
 
 
 _CONTEXT_EFFECT_ALIASES: dict[str, str] = {
@@ -417,15 +455,43 @@ def _normalize_signal_bar_quality(out: dict[str, Any]) -> None:
 
 
 def _normalize_transition_risk(out: dict[str, Any]) -> None:
-    """Normalize transition_risk to valid enum values."""
+    """Normalize transition_risk enums and extract a level from prose slips."""
     risk = out.get("transition_risk")
     if not isinstance(risk, str):
         return
     key = risk.strip().lower()
     normalized = _TRANSITION_RISK_ALIASES.get(key)
+    extracted_from_prose = normalized is None
+    if normalized is None:
+        if (
+            re.search(r"\brisk(?:\s+level)?\s*(?:is|:|=)?\s*high\b", key)
+            or any(cue in key for cue in _TRANSITION_RISK_HIGH_CUES)
+        ):
+            normalized = "high"
+        elif (
+            re.search(r"\brisk(?:\s+level)?\s*(?:is|:|=)?\s*low\b", key)
+            or any(cue in key for cue in _TRANSITION_RISK_LOW_CUES)
+        ):
+            normalized = "low"
+        elif (
+            re.search(r"\b(?:medium|moderate)(?:\s+risk)?\b", key)
+            or re.search(r"\brisk(?:\s+level)?\s*(?:is|:|=)?\s*medium\b", key)
+        ):
+            normalized = "medium"
+        elif key:
+            # transition_risk is a coarse enum; models sometimes put the full
+            # explanation here. Preserve caution when no clear level is stated.
+            normalized = "medium"
     if normalized and normalized != risk:
         out["transition_risk"] = normalized
-        logger.debug("Mapped transition_risk %r -> %s", risk, normalized)
+        if extracted_from_prose and risk.strip():
+            warning = out.get("risk_warning")
+            if isinstance(warning, str) and warning.strip():
+                if risk.strip() not in warning:
+                    out["risk_warning"] = f"{warning.strip()}；风险依据：{risk.strip()}"
+            else:
+                out["risk_warning"] = risk.strip()
+        logger.debug("Normalized transition_risk to %s", normalized)
 
 
 def _summary_bar_seq(bar_label: object) -> int | None:

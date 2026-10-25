@@ -50,9 +50,13 @@ _ENTRY_BAR_STRENGTH_ALIASES: dict[str, str] = {
     "pending": "not_triggered",
     "waiting": "not_triggered",
     "triggered": "strong",
+    "medium": "weak",
+    "moderate": "weak",
     "not_triggered": "not_triggered",
     "strong": "strong",
     "weak": "weak",
+    "中等": "weak",
+    "中": "weak",
 }
 
 _TERMINAL_OUTCOME_ALIASES: dict[str, str] = {

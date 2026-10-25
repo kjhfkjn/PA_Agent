@@ -21,10 +21,11 @@ class RecordMeta(BaseModel):
     bar_count: int
     ai_provider: dict         # Sanitized provider config snapshot (no plaintext API key)
     decision_stance: str = "conservative"  # conservative | balanced | aggressive | extreme_aggressive
+    analysis_strategy: str = "two_stage"
 
 
 class AnalysisRecord(BaseModel):
-    """Full record of a two-stage AI analysis run."""
+    """Full or partial record of an AI analysis run."""
 
     model_config = ConfigDict(extra="forbid")
 

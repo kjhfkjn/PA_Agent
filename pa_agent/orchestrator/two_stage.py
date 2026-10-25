@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from pa_agent.ai.json_validator import JsonValidator
     from pa_agent.ai.prompt_assembler import PromptAssembler
     from pa_agent.config.settings import Settings
+    from pa_agent.orchestrator.contracts import TwoStagePromptStrategy
     from pa_agent.records.experience_reader import ExperienceReader
     from pa_agent.records.pending_writer import PendingWriter
 
@@ -260,6 +261,14 @@ def _build_empty_record(
         bar_count=len(frame.bars),
         ai_provider=ai_provider,
         decision_stance=decision_stance,
+        analysis_strategy=str(
+            getattr(
+                getattr(settings, "general", None),
+                "analysis_strategy",
+                "two_stage",
+            )
+            or "two_stage"
+        ),
     )
 
     return AnalysisRecord(
@@ -333,15 +342,25 @@ class TwoStageOrchestrator:
     def __init__(
         self,
         client: "DeepSeekClient",
-        assembler: "PromptAssembler",
+        assembler: "PromptAssembler | None",
         router: Any,
         validator: "JsonValidator",
         pending_writer: "PendingWriter",
         exp_reader: "ExperienceReader",
         settings: Optional["Settings"] = None,
+        prompt_strategy: "TwoStagePromptStrategy | None" = None,
     ) -> None:
         self._client = client
-        self._assembler = assembler
+        # Keep PromptAssembler as the compatibility default.  A dedicated
+        # prompt strategy can now replace prompt construction without
+        # reimplementing execution, validation, retries or persistence.
+        self._prompt_strategy = (
+            prompt_strategy if prompt_strategy is not None else assembler
+        )
+        if self._prompt_strategy is None:
+            raise ValueError(
+                "TwoStageOrchestrator requires a PromptAssembler or prompt_strategy."
+            )
         self._router = router
         self._validator = validator
         self._pending_writer = pending_writer
@@ -432,7 +451,7 @@ class TwoStageOrchestrator:
 
         # ── Step 4: Build Stage 1 messages ───────────────────────────────────
         if previous_record is not None and incremental_new_bar_count is not None:
-            messages_s1 = self._assembler.build_incremental_stage1(
+            messages_s1 = self._prompt_strategy.build_incremental_stage1(
                 frame,
                 previous_record,
                 incremental_new_bar_count,
@@ -440,7 +459,10 @@ class TwoStageOrchestrator:
                 provider_settings=getattr(self._settings, "provider", None),
             )
         else:
-            messages_s1 = self._assembler.build_stage1(frame, analysis_mode=analysis_mode)
+            messages_s1 = self._prompt_strategy.build_stage1(
+                frame,
+                analysis_mode=analysis_mode,
+            )
 
         # ── Step 5: Call AI for Stage 1 ───────────────────────────────────────
         logger.debug("\n" + "="*80)
@@ -815,7 +837,7 @@ class TwoStageOrchestrator:
             )
             or 3
         )
-        messages_s2 = self._assembler.build_stage2_continuation(
+        messages_s2 = self._prompt_strategy.build_stage2_continuation(
             frame=frame,
             stage1_messages=messages_s1,
             stage1_reply_content=reply_s1.content,

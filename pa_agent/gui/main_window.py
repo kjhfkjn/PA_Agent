@@ -338,6 +338,7 @@ class MainWindow(QMainWindow):
         self._analysis_in_progress = False
         self._last_analysis_had_error = False
         self._current_analysis_stream_id = ""
+        self._backtest_sync_context_by_analysis_id: dict[str, dict[str, Any]] = {}
         self._switching = False
         self._chart_refresh_paused = False
         self._pending_submit_after_close = False
@@ -3374,6 +3375,16 @@ class MainWindow(QMainWindow):
 
         stream_analysis_id = uuid.uuid4().hex
         self._current_analysis_stream_id = stream_analysis_id
+        sync_context = self._backtest_sync_context_for_bars(
+            symbol,
+            timeframe,
+            snapshot_bars,
+        )
+        if sync_context:
+            self._backtest_sync_context_by_analysis_id[stream_analysis_id] = sync_context
+            if len(self._backtest_sync_context_by_analysis_id) > 8:
+                oldest = next(iter(self._backtest_sync_context_by_analysis_id))
+                self._backtest_sync_context_by_analysis_id.pop(oldest, None)
         self._worker = _AnalysisWorker(
             orchestrator=orchestrator,
             frame=frame,
@@ -3500,9 +3511,51 @@ class MainWindow(QMainWindow):
         if not callable(publish):
             return
         try:
-            publish(**payload)
+            event_payload = dict(payload)
+            if event_payload.get("event") in {"completed", "failed"}:
+                context = self._backtest_sync_context_by_analysis_id.get(
+                    str(event_payload.get("analysis_id", ""))
+                )
+                if context:
+                    event_payload["sync_id"] = context.get("syncId")
+                    event_payload["backtest_session_id"] = context.get(
+                        "backtestSessionId"
+                    )
+            publish(**event_payload)
         except Exception as exc:  # noqa: BLE001
             logger.debug("Extension live analysis update skipped: %s", exc)
+
+    def _backtest_sync_context_for_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        bars: Any,
+    ) -> dict[str, Any] | None:
+        """Bind an analysis to the exact acknowledged extension snapshot."""
+        if not self._backtest_mode_active():
+            return None
+        source = getattr(self._ctx, "data_source", None)
+        context_reader = getattr(source, "backtest_sync_context", None)
+        if not callable(context_reader):
+            return None
+        try:
+            from pa_agent.data.datetime_ts import ts_open_to_ms
+
+            timestamps = []
+            for bar in bars or ():
+                raw_time = getattr(bar, "ts_open", None)
+                if raw_time is None and isinstance(bar, dict):
+                    raw_time = bar.get("ts_open", bar.get("time"))
+                if raw_time is None:
+                    continue
+                timestamps.append(int(ts_open_to_ms(raw_time)))
+            if not timestamps:
+                return None
+            context = context_reader(symbol, timeframe, max(timestamps))
+            return dict(context) if isinstance(context, dict) else None
+        except (TypeError, ValueError, OverflowError):
+            logger.debug("Could not resolve extension snapshot sync identity", exc_info=True)
+            return None
 
     def _find_incremental_base_record(
         self,
@@ -3641,15 +3694,25 @@ class MainWindow(QMainWindow):
         publisher = getattr(getattr(self._ctx, "data_source", None), "publish_analysis_stream", None)
         if not callable(publisher):
             return
+        analysis_id = (
+            self._current_analysis_stream_id
+            or str(getattr(meta, "timestamp_local_ms", "") or "")
+        )
+        sync_context = self._backtest_sync_context_by_analysis_id.get(analysis_id)
+        if not sync_context:
+            sync_context = self._backtest_sync_context_for_bars(
+                symbol,
+                timeframe,
+                getattr(record, "kline_data", None) or (),
+            )
         publisher(
             event="completed",
             symbol=symbol,
             timeframe=timeframe,
-            analysis_id=(
-                self._current_analysis_stream_id
-                or str(getattr(meta, "timestamp_local_ms", "") or "")
-            ),
+            analysis_id=analysis_id,
             bar_time=max(bar_times),
+            sync_id=(sync_context or {}).get("syncId"),
+            backtest_session_id=(sync_context or {}).get("backtestSessionId"),
         )
         logger.info(
             "Published backtest analysis completion: symbol=%s timeframe=%s bar_time=%s",
@@ -3694,6 +3757,11 @@ class MainWindow(QMainWindow):
                 error,
             )
             return
+        sync_context = self._backtest_sync_context_for_bars(
+            symbol,
+            timeframe,
+            bars,
+        )
         analysis_id = uuid.uuid4().hex
         publisher(
             event="started",
@@ -3708,6 +3776,8 @@ class MainWindow(QMainWindow):
             analysis_id=analysis_id,
             bar_time=max(bar_times),
             error=str(error)[:500],
+            sync_id=(sync_context or {}).get("syncId"),
+            backtest_session_id=(sync_context or {}).get("backtestSessionId"),
         )
         logger.warning(
             "Published backtest pre-worker failure: symbol=%s timeframe=%s bar_time=%s error=%s",
@@ -4548,6 +4618,10 @@ class MainWindow(QMainWindow):
         if not self._ui_is_alive():
             return
         try:
+            self._backtest_sync_context_by_analysis_id.pop(
+                self._current_analysis_stream_id,
+                None,
+            )
             self._analysis_in_progress = False
             self._auto_incremental_pending = False
             self._worker = None
@@ -4988,9 +5062,12 @@ class MainWindow(QMainWindow):
         return _snapshot
 
     def _build_orchestrator(self) -> Any:
-        """Build a TwoStageOrchestrator from ctx components, or return None."""
+        """Build the configured analysis strategy from ctx components."""
         try:
-            from pa_agent.orchestrator.two_stage import TwoStageOrchestrator
+            from pa_agent.orchestrator.strategy_registry import (
+                AnalysisComponents,
+                create_analysis_strategy,
+            )
 
             client = getattr(self._ctx, "client", None)
             assembler = getattr(self._ctx, "assembler", None)
@@ -4999,22 +5076,25 @@ class MainWindow(QMainWindow):
             pending_writer = getattr(self._ctx, "pending_writer", None)
             exp_reader = getattr(self._ctx, "exp_reader", None)
             settings = getattr(self._ctx, "settings", None)
+            prompt_strategy = getattr(self._ctx, "prompt_strategy", None)
 
-            if any(
-                x is None
-                for x in [client, assembler, router, validator,
-                           pending_writer, exp_reader]
-            ):
-                return None
-
-            return TwoStageOrchestrator(
-                client=client,
-                assembler=assembler,
-                router=router,
-                validator=validator,
-                pending_writer=pending_writer,
-                exp_reader=exp_reader,
-                settings=settings,
+            general_settings = getattr(settings, "general", None)
+            strategy_name = str(
+                getattr(general_settings, "analysis_strategy", "two_stage")
+                or "two_stage"
+            )
+            return create_analysis_strategy(
+                strategy_name,
+                AnalysisComponents(
+                    client=client,
+                    assembler=assembler,
+                    router=router,
+                    validator=validator,
+                    pending_writer=pending_writer,
+                    exp_reader=exp_reader,
+                    settings=settings,
+                    prompt_strategy=prompt_strategy,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not build orchestrator: %s", exc)

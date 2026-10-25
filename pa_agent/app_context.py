@@ -26,6 +26,7 @@ class AppContext:
     pending_writer: Any = None    # PendingWriter
     exp_reader: Any = None        # ExperienceReader
     ledger: Any = None            # SessionTokenLedger
+    prompt_strategy: Any = None   # Optional TwoStagePromptStrategy override
 
     def shutdown(self) -> None:
         """Release app-owned resources once, regardless of the quit path."""

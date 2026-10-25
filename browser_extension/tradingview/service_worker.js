@@ -13,6 +13,24 @@ let analysisEventReconnectTimer = 0;
 let analysisEventReconnectDelay = 1000;
 let backtestAdvanceInProgress = false;
 let captureRestoreInProgress = false;
+let analysisEventQueue = Promise.resolve();
+let snapshotSyncQueue = Promise.resolve();
+let backtestOperationQueue = Promise.resolve();
+let backtestOperationCount = 0;
+
+const withBacktestAdvanceLock = (operation) => {
+  backtestOperationCount += 1;
+  backtestAdvanceInProgress = true;
+  const task = backtestOperationQueue
+    .catch(() => {})
+    .then(operation)
+    .finally(() => {
+      backtestOperationCount = Math.max(0, backtestOperationCount - 1);
+      backtestAdvanceInProgress = backtestOperationCount > 0;
+    });
+  backtestOperationQueue = task.catch(() => {});
+  return task;
+};
 
 if (chrome.sidePanel?.setPanelBehavior) {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((error) => {
@@ -116,22 +134,42 @@ const scheduleAnalysisEventReconnect = () => {
   analysisEventReconnectDelay = Math.min(analysisEventReconnectDelay * 2, 15000);
 };
 
-const startInitialReplayIfNeeded = async () => {
-  if (backtestAdvanceInProgress) return { ok: true, waiting: true };
-  const stored = await chrome.storage.local.get([
-    "backtestMode",
-    "backtestPending",
-    "backtestFailureStreak"
-  ]);
-  if (!stored.backtestMode || stored.backtestPending) return { ok: true };
+const startInitialReplayIfNeeded = () => withBacktestAdvanceLock(async () => {
+  let stored;
+  try {
+    stored = await chrome.storage.local.get([
+      "backtestMode",
+      "backtestPending",
+      "backtestFailureStreak"
+    ]);
+  } catch (error) {
+    backtestError = `读取回测状态失败：${error.message}`;
+    latest.error = backtestError;
+    return { ok: false, error: backtestError };
+  }
+  if (!stored.backtestMode) return { ok: true };
   if (Number(stored.backtestFailureStreak || 0) >= 3) {
     latest.error = "连续 3 根 K 线分析失败，自动回测已暂停";
     latest.backtestStatus = "连续分析失败，自动回测已暂停";
     return { ok: true, paused: true };
   }
-  backtestAdvanceInProgress = true;
+  const pending = stored.backtestPending;
+  const recoverable = [
+    "syncing",
+    "sync_failed",
+    "advance_ready",
+    "advance_failed"
+  ].includes(String(pending?.state || ""));
+  if (pending && !recoverable) return { ok: true, waiting: true };
   try {
-    await advanceReplayAndSync();
+    if (pending?.state === "sync_failed" || pending?.state === "syncing") {
+      const current = await queryActiveChart(pending.tabId || null);
+      await sendReceivedSnapshot(current.tab, current.received);
+    } else if (pending) {
+      await resumeReplayFromPending(pending);
+    } else {
+      await advanceReplayAndSync();
+    }
     backtestError = "";
     latest.backtestStatus = "等待 Agent 分析当前 K 线";
     return { ok: true };
@@ -140,18 +178,19 @@ const startInitialReplayIfNeeded = async () => {
     latest.error = error.message;
     latest.backtestStatus = "初始回放同步失败，请查看错误信息";
     return { ok: false, error: error.message };
-  } finally {
-    backtestAdvanceInProgress = false;
   }
-};
+});
 
-const handleAnalysisEvent = async (event) => {
+const handleAnalysisEventLocked = async (event) => {
   const analysisFailed = event.event === "failed";
   if (
     (!analysisFailed && event.event !== "completed")
     || !Number.isFinite(Number(event.eventId))
   ) return;
   const eventId = Number(event.eventId);
+  // Flush every snapshot POST already queued before matching a completion.
+  // Otherwise an older in-flight upload could replace the pending identity.
+  await snapshotSyncQueue.catch(() => {});
   const stored = await chrome.storage.local.get([
     "backtestMode",
     "backtestPending",
@@ -164,12 +203,20 @@ const handleAnalysisEvent = async (event) => {
   const eventTime = Number(event.barTime) < 100000000000
     ? Number(event.barTime) * 1000
     : Number(event.barTime);
+  const legacyTimeMatches = Math.abs(eventTime - Number(pending?.barTime)) < 1000
+    && Number(event.createdAt || 0) >= Number(pending?.sentAt || pending?.createdAt || 0);
+  const syncMatches = event.syncId && pending?.syncId
+    ? String(event.syncId) === String(pending.syncId)
+    : legacyTimeMatches;
+  const sessionMatches = !event.backtestSessionId
+    || !pending?.backtestSessionId
+    || String(event.backtestSessionId) === String(pending.backtestSessionId);
   const matchesPending = !!stored.backtestMode
     && !!pending
     && normalizeEventSymbol(event.symbol) === normalizeEventSymbol(pending.symbol)
     && normalizeEventTimeframe(event.timeframe) === normalizeEventTimeframe(pending.timeframe)
-    && Math.abs(eventTime - Number(pending.barTime)) < 1000
-    && Number(event.createdAt || 0) >= Number(pending.sentAt || 0);
+    && syncMatches
+    && sessionMatches;
 
   if (!matchesPending) {
     await chrome.storage.local.set({ lastAnalysisEventId: eventId });
@@ -189,28 +236,21 @@ const handleAnalysisEvent = async (event) => {
     });
     return;
   }
-  if (backtestAdvanceInProgress) {
-    // Do not drop an event that arrives during an in-flight chart transition.
-    // The stream advances its cursor after delivery, so defer processing here.
-    setTimeout(() => {
-      handleAnalysisEvent(event).catch((error) => {
-        backtestError = `处理 Agent 完成消息失败：${error.message}`;
-        latest.error = backtestError;
-      });
-    }, 500);
-    return;
-  }
-  backtestAdvanceInProgress = true;
   latest.backtestStatus = analysisFailed
     ? "当前 K 线分析失败（错误已记录），继续推进下一根"
     : "Agent 已完成当前 K 线分析，等待下一根有效 K 线同步";
-  await chrome.storage.local.set({
-    lastAnalysisEventId: eventId,
-    backtestPending: null,
-    backtestFailureStreak: failureStreak
-  });
+  const completedPending = {
+    ...pending,
+    state: "advance_ready",
+    completionEventId: eventId
+  };
   try {
-    await advanceReplayAndSync();
+    await chrome.storage.local.set({
+      lastAnalysisEventId: eventId,
+      backtestPending: completedPending,
+      backtestFailureStreak: failureStreak
+    });
+    await resumeReplayFromPending(completedPending);
     backtestError = "";
     if (analysisFailed) {
       const error = String(event.error || "Agent 分析失败").slice(0, 500);
@@ -223,10 +263,24 @@ const handleAnalysisEvent = async (event) => {
     backtestError = `Agent 分析完成，但自动推进失败：${error.message}`;
     latest.error = backtestError;
     latest.backtestStatus = "自动推进失败，请查看错误信息";
-    await chrome.storage.local.set({ backtestPending: pending });
-  } finally {
-    backtestAdvanceInProgress = false;
+    await chrome.storage.local.set({
+      backtestPending: { ...completedPending, state: "advance_failed" }
+    });
   }
+};
+
+const handleAnalysisEvent = (event) => (
+  withBacktestAdvanceLock(() => handleAnalysisEventLocked(event))
+);
+
+const enqueueAnalysisEvent = (event) => {
+  analysisEventQueue = analysisEventQueue
+    .then(() => handleAnalysisEvent(event))
+    .catch((error) => {
+      backtestError = `处理 Agent 完成消息失败：${error.message}`;
+      latest.error = backtestError;
+    });
+  return analysisEventQueue;
 };
 
 const connectAnalysisEventStream = async () => {
@@ -253,7 +307,7 @@ const connectAnalysisEventStream = async () => {
       // A restarted Agent has an empty in-memory bridge. Re-send the current
       // replay snapshot so an old pending item cannot leave the new Agent idle.
       if (stored.backtestMode && stored.backtestPending) {
-        const current = await queryActiveChart();
+        const current = await queryActiveChart(stored.backtestPending?.tabId || null);
         await sendReceivedSnapshot(current.tab, current.received);
       }
       await chrome.storage.local.set({
@@ -289,10 +343,7 @@ const connectAnalysisEventStream = async () => {
         }
         if (event.type === "llm_stream") {
           if (event.event === "completed" || event.event === "failed") {
-            handleAnalysisEvent(event).catch((error) => {
-              backtestError = `处理 Agent 完成消息失败：${error.message}`;
-              latest.error = backtestError;
-            });
+            enqueueAnalysisEvent(event);
           }
           if (Number(event.eventId || 0) <= liveEventFloor) return;
           for (const port of liveStreamPorts) {
@@ -304,10 +355,7 @@ const connectAnalysisEventStream = async () => {
           socket.close();
           return;
         }
-        handleAnalysisEvent(event).catch((error) => {
-          backtestError = `处理 Agent 完成消息失败：${error.message}`;
-          latest.error = backtestError;
-        });
+        enqueueAnalysisEvent(event);
       } catch (error) {
         backtestError = `Agent 完成消息格式无效：${error.message}`;
         latest.error = backtestError;
@@ -329,32 +377,58 @@ const connectAnalysisEventStream = async () => {
   }
 };
 
-const queryActiveChart = async (tabId = null, timeoutMs = 900) => {
+const queryActiveChart = async (tabId = null, timeoutMs = 5000) => {
   let tab;
-  if (tabId !== null) {
-    tab = await chrome.tabs.get(tabId);
-  } else {
-    [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  try {
+    if (tabId !== null) {
+      tab = await chrome.tabs.get(tabId);
+    } else {
+      [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    }
+  } catch (error) {
+    throw new Error(`无法读取回测使用的 TradingView 标签页：${error.message}`);
   }
   if (!tab?.id || !/^https:\/\/[^/]*tradingview\.com\/chart\//.test(tab.url || "")) {
     throw new Error("请先切换到 TradingView 图表标签页");
   }
-  const received = await new Promise((resolve) => {
-    const listener = (message, sender) => {
-      if (message?.type === "PA_AGENT_CHART_DATA" && sender.tab?.id === tab.id) {
-        chrome.runtime.onMessage.removeListener(listener);
-        resolve(message.payload);
-      }
-    };
-    chrome.runtime.onMessage.addListener(listener);
-    chrome.tabs.sendMessage(tab.id, { type: "PA_AGENT_POLL" }).catch(() => {});
-    setTimeout(() => {
-      chrome.runtime.onMessage.removeListener(listener);
-      resolve(null);
-    }, timeoutMs);
-  });
-  if (!received) throw new Error("尚未收到 TradingView 图表数据；请确认图表已加载并重试");
-  return { tab, received };
+  const deadline = Date.now() + timeoutMs;
+  let lastReceived = null;
+  let lastMessageError = "";
+  while (Date.now() < deadline) {
+    const remaining = deadline - Date.now();
+    const reply = await new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(
+        () => finish({ error: "TradingView 图表读取器没有响应" }),
+        Math.min(700, remaining)
+      );
+      chrome.tabs.sendMessage(tab.id, { type: "PA_AGENT_POLL" }, (response) => {
+        const error = chrome.runtime.lastError?.message;
+        finish(error ? { error } : { response });
+      });
+    });
+    if (reply.error) {
+      lastMessageError = reply.error;
+    } else if (reply.response?.type === "PA_AGENT_CHART_DATA") {
+      lastReceived = reply.response.payload || null;
+      if (lastReceived?.bars?.length) return { tab, received: lastReceived };
+    }
+    const pause = Math.min(150, Math.max(0, deadline - Date.now()));
+    if (pause > 0) await new Promise((resolve) => setTimeout(resolve, pause));
+  }
+  if (lastReceived) {
+    throw new Error("TradingView 图表读取器已响应，但尚未收到有效 K 线；请等待图表加载后重试");
+  }
+  if (lastMessageError) {
+    throw new Error(`未收到 TradingView 图表数据；请确认扩展已加载且图表已打开（${lastMessageError}）`);
+  }
+  throw new Error("尚未收到 TradingView 图表数据；请确认图表已加载并重试");
 };
 
 const replayEdgeTime = (received) => {
@@ -428,8 +502,10 @@ const sendReplayShortcut = async (tabId) => {
   try {
     // Bar Replay's Shift+Right shortcut, dispatched as browser input so the
     // TradingView key handler receives a trusted event.
-    await sendKey("keyDown", "Shift", "ShiftLeft", 16);
-    await sendKey("keyDown", "ArrowRight", "ArrowRight", 39, 8);
+    // CDP's modifier bitmask describes the modifiers pressed for each event,
+    // including the Shift keydown itself.
+    await sendKey("rawKeyDown", "Shift", "ShiftLeft", 16, 8);
+    await sendKey("rawKeyDown", "ArrowRight", "ArrowRight", 39, 8);
     await sendKey("keyUp", "ArrowRight", "ArrowRight", 39, 8);
     await sendKey("keyUp", "Shift", "ShiftLeft", 16);
   } catch (error) {
@@ -466,8 +542,8 @@ const clickReplayNext = async (tabId) => new Promise((resolve, reject) => {
   });
 });
 
-const advanceReplayAndSync = async (knownChart = null) => {
-  const { tab, received: before } = knownChart || await queryActiveChart();
+const advanceReplayAndSync = async (knownChart = null, tabId = null) => {
+  const { tab, received: before } = knownChart || await queryActiveChart(tabId);
   if (String(before.resolution) !== "5") {
     throw new Error("回测模式只支持 TradingView 5 分钟图表");
   }
@@ -516,7 +592,26 @@ const advanceReplayAndSync = async (knownChart = null) => {
   return result;
 };
 
-const sendReceivedSnapshot = async (tab, received, explicitHistoryCutoff) => {
+const resumeReplayFromPending = async (pending) => {
+  const current = await queryActiveChart(pending.tabId || null);
+  const currentCutoff = replayDataCutoff(current.received).time;
+  const analyzedCutoff = Number(pending.barTime || 0);
+  if (!currentCutoff || !analyzedCutoff) {
+    throw new Error("无法恢复回放进度：缺少当前截止棒或已分析截止棒");
+  }
+  if (currentCutoff > analyzedCutoff) {
+    // The chart transition completed before the service worker stopped or the
+    // snapshot POST failed. Sync the visible candle instead of stepping twice.
+    await sendReceivedSnapshot(current.tab, current.received);
+    return;
+  }
+  if (currentCutoff < analyzedCutoff) {
+    throw new Error("TradingView 回放位置已倒退；请先同步当前 K 线再继续");
+  }
+  await advanceReplayAndSync(current, pending.tabId || null);
+};
+
+const sendReceivedSnapshotNow = async (tab, received, explicitHistoryCutoff) => {
   latest = { ...received, receivedAt: Date.now(), error: "" };
   if (!received.bars?.length) throw new Error("尚未收到包含有效 K 线的图表数据包；悬停 OHLC 不会被当作历史数据");
   const stored = await chrome.storage.local.get(["symbolFilter", "timeframeFilter", "historyCutoff", "autoCutoff", "backtestMode"]);
@@ -556,29 +651,97 @@ const sendReceivedSnapshot = async (tab, received, explicitHistoryCutoff) => {
   if (timeframeFilter !== "*" && String(received.resolution) !== timeframeFilter) {
     throw new Error(`当前图表周期 ${received.resolution} 不符合周期过滤 ${timeframeFilter}`);
   }
-  await sendBridge("/api/v1/heartbeat", { pageUrl: tab.url, symbol: received.symbol, resolution: received.resolution, diagnostics: received.diagnostics });
-  await sendBridge("/api/v1/klines", {
-    pageUrl: tab.url,
-    symbol: received.symbol,
-    resolution: received.resolution,
-    source: "tradingview_edge_extension",
-    bars: received.bars,
-    cutoffTime,
-    cutoffSource,
-    diagnostics: received.diagnostics
-  });
+  let backtestSessionId = null;
   if (stored.backtestMode) {
     await sendBridge("/api/v1/backtest", { enabled: true });
-    if (cutoffTime) {
-      await chrome.storage.local.set({
-        backtestPending: {
-          symbol: normalizeEventSymbol(received.symbol),
-          timeframe: normalizeEventTimeframe(received.resolution),
-          barTime: cutoffTime,
-          sentAt: Date.now()
-        }
-      });
+    const bridgeStatus = await refreshBridgeToken();
+    backtestSessionId = String(bridgeStatus.backtestSessionId || "");
+    if (!backtestSessionId) throw new Error("Agent 未返回有效的回测会话编号");
+    if (!cutoffTime) throw new Error("回测快照缺少有效截止棒时间");
+  }
+  const storedPending = stored.backtestMode
+    ? (await chrome.storage.local.get(["backtestPending"])).backtestPending
+    : null;
+  const sameUnfinishedBar = ["awaiting_analysis", "syncing", "sync_failed"]
+    .includes(String(storedPending?.state || ""))
+    && storedPending.backtestSessionId === backtestSessionId
+    && storedPending.symbol === normalizeEventSymbol(received.symbol)
+    && storedPending.timeframe === normalizeEventTimeframe(received.resolution)
+    && Number(storedPending.barTime) === Number(cutoffTime);
+  const syncId = sameUnfinishedBar ? storedPending.syncId : crypto.randomUUID();
+  const pending = stored.backtestMode ? {
+    syncId,
+    backtestSessionId,
+    symbol: normalizeEventSymbol(received.symbol),
+    timeframe: normalizeEventTimeframe(received.resolution),
+    barTime: cutoffTime,
+    tabId: tab.id,
+    state: "syncing",
+    createdAt: Date.now()
+  } : null;
+  if (pending) {
+    // Persist the correlation identity before the Agent can observe the
+    // snapshot and start analysis.
+    await chrome.storage.local.set({ backtestPending: pending });
+  }
+  try {
+    const acknowledgement = await sendBridge("/api/v1/klines", {
+      pageUrl: tab.url,
+      symbol: received.symbol,
+      resolution: received.resolution,
+      source: "tradingview_edge_extension",
+      bars: received.bars,
+      cutoffTime,
+      cutoffSource,
+      diagnostics: received.diagnostics,
+      syncId,
+      backtestSessionId
+    });
+    if (acknowledgement?.syncId !== syncId) {
+      throw new Error(
+        acknowledgement?.syncId
+          ? "Agent 确认了不同的图表快照编号"
+          : "Agent 桥接协议版本过旧或未重启；请先重启 PA Agent"
+      );
     }
+    if (
+      Number(acknowledgement.cutoffTime || 0) !== Number(cutoffTime || 0)
+      || (pending && acknowledgement.backtestSessionId !== backtestSessionId)
+    ) {
+      throw new Error("Agent 确认的回测会话或截止棒与当前快照不一致");
+    }
+    if (pending) {
+      const current = await chrome.storage.local.get(["backtestPending"]);
+      if (
+        current.backtestPending?.syncId === syncId
+        && current.backtestPending?.state === "syncing"
+      ) {
+        await chrome.storage.local.set({
+          backtestPending: {
+            ...current.backtestPending,
+            state: "awaiting_analysis",
+            acknowledgedAt: Date.now()
+          }
+        });
+      }
+    }
+  } catch (error) {
+    if (pending) {
+      const current = await chrome.storage.local.get(["backtestPending"]);
+      if (
+        current.backtestPending?.syncId === syncId
+        && current.backtestPending?.state === "syncing"
+      ) {
+        await chrome.storage.local.set({
+          backtestPending: {
+            ...current.backtestPending,
+            state: "sync_failed",
+            syncError: String(error.message || error).slice(0, 500)
+          }
+        });
+      }
+    }
+    throw error;
   }
   latest = {
     ...latest,
@@ -591,6 +754,14 @@ const sendReceivedSnapshot = async (tab, received, explicitHistoryCutoff) => {
   };
   if (stored.backtestMode) backtestError = "";
   return latest;
+};
+
+const sendReceivedSnapshot = (tab, received, explicitHistoryCutoff) => {
+  const task = snapshotSyncQueue
+    .catch(() => {})
+    .then(() => sendReceivedSnapshotNow(tab, received, explicitHistoryCutoff));
+  snapshotSyncQueue = task.catch(() => {});
+  return task;
 };
 
 const capture = async (explicitHistoryCutoff) => {

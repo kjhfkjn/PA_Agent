@@ -1385,7 +1385,7 @@ K线收盘的附加规则：
   "spike_stage": "active/ending/transitioning（仅当cycle_position=spike或micro_channel时必填；active=进行中，ending=特征减弱但未完全结束，transitioning=已结束正在转通道/区间）",
   "climax_risk": "none/warning/triggered（高潮风险字段，独立于spike_stage；warning=连续强趋势棒过多但未衰竭，triggered=已出现长尾/小实体/反向棒等衰竭信号）",
   "market_phase": "stable/transitioning（stable=当前状态稳定持续中，transitioning=状态正在发生转换，如通道→区间、尖峰→通道等）",
-  "transition_risk": "low/medium/high（状态转换期的误判风险等级，仅当market_phase=transitioning时必填）",
+  "transition_risk": "low/medium/high（状态转换期的误判风险等级，仅当market_phase=transitioning时必填；只填一个枚举值，解释写入risk_warning）",
   "detected_patterns": ["wedge", "reversal_attempt"]（楔形/反转等特殊形态检测结果，无则为空数组[]，值含义见下方说明）,
   "key_signals": ["信号1", "信号2"],
   "htf_context": "长程结构窗口的背景描述",

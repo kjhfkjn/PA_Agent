@@ -12,6 +12,7 @@ import struct
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
@@ -68,6 +69,9 @@ class TradingViewExtensionBridge:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+        self._snapshot_sync_contexts: OrderedDict[
+            tuple[str, str, int, str], dict[str, Any]
+        ] = OrderedDict()
         # Replay cutoffs belong to a chart snapshot. A global cutoff lets a
         # later update from another timeframe silently truncate this chart.
         self._last_seen: float | None = None
@@ -296,7 +300,9 @@ class TradingViewExtensionBridge:
                             raise ValueError("enabled must be a boolean")
                         bridge.set_backtest_enabled(enabled_value)
                     else:
-                        bridge.accept_snapshot(payload)
+                        acknowledgement = bridge.accept_snapshot(payload)
+                        self._json(200, {"ok": True, **acknowledgement})
+                        return
                 except (ValueError, TypeError, json.JSONDecodeError) as exc:
                     self._json(400, {"ok": False, "error": str(exc)[:160]})
                     return
@@ -393,6 +399,8 @@ class TradingViewExtensionBridge:
                         "cutoffSource": item.get("cutoffSource", "unknown"),
                         "source": item.get("source", "tradingview_extension"),
                         "receivedAt": item.get("receivedAt"),
+                        "syncId": item.get("syncId"),
+                        "backtestSessionId": item.get("backtestSessionId"),
                     }
                     for item in self._snapshots.values()
                 ],
@@ -464,6 +472,8 @@ class TradingViewExtensionBridge:
         decision: dict[str, Any] | None = None,
         bar_time: int | None = None,
         error: str = "",
+        sync_id: str | None = None,
+        backtest_session_id: str | None = None,
     ) -> None:
         """Publish live model output to the extension; data stays in process memory."""
         stage_key = "stage1" if stage == "stage1" else "stage2"
@@ -513,6 +523,10 @@ class TradingViewExtensionBridge:
                 item["decision"] = decision or {}
             if event in {"completed", "failed"} and bar_time is not None:
                 item["barTime"] = int(bar_time)
+                if sync_id:
+                    item["syncId"] = str(sync_id)[:100]
+                if backtest_session_id:
+                    item["backtestSessionId"] = str(backtest_session_id)[:100]
             if event == "failed" and error:
                 item["error"] = str(error)[:1000]
             self._next_event_id += 1
@@ -520,7 +534,7 @@ class TradingViewExtensionBridge:
             self._events = self._events[-4096:]
             self._event_condition.notify_all()
 
-    def accept_snapshot(self, payload: dict[str, Any]) -> None:
+    def accept_snapshot(self, payload: dict[str, Any]) -> dict[str, Any]:
         symbol = str(payload.get("symbol", "")).strip()
         resolution = str(payload.get("resolution", "")).strip()
         rows = payload.get("bars")
@@ -552,34 +566,90 @@ class TradingViewExtensionBridge:
                 continue
             bars[ts] = ohlcv  # type: ignore[assignment]
         if not bars:
-            return
+            raise ValueError("snapshot contains no valid bars")
         key = (_normalize_symbol(symbol), _normalize_timeframe(resolution))
+        try:
+            raw_cutoff = payload.get("cutoffTime")
+            cutoff = int(raw_cutoff) if raw_cutoff is not None else None
+            if cutoff is not None and 0 < cutoff < 10_000_000_000:
+                cutoff *= 1000
+            cutoff = cutoff if cutoff and cutoff > 0 else None
+        except (TypeError, ValueError, OverflowError):
+            cutoff = None
+        sync_id = str(payload.get("syncId", "")).strip()[:100] or uuid.uuid4().hex
+        backtest_session_id = (
+            str(payload.get("backtestSessionId") or "").strip()[:100] or None
+        )
+        timeframe = _normalize_timeframe(resolution)
         with self._lock:
+            if backtest_session_id and (
+                not self._backtest_enabled
+                or backtest_session_id != self._backtest_session_id
+            ):
+                raise ValueError("snapshot belongs to an inactive backtest session")
             self._last_seen = time.monotonic()
             self._browser_symbol = symbol
             self._browser_resolution = resolution
             self._page_url = str(payload.get("pageUrl", self._page_url))[:500]
-            self._snapshots[key] = {
+            snapshot = {
                 "symbol": symbol,
-                "timeframe": _normalize_timeframe(resolution),
+                "timeframe": timeframe,
                 "resolution": resolution,
                 "bars": dict(sorted(bars.items())[-MAX_BARS:]),
                 "receivedAt": self._last_seen,
-                "cutoffTime": None,
+                "cutoffTime": cutoff,
                 "cutoffSource": "unknown",
                 "source": str(payload.get("source", "tradingview_extension"))[:80],
+                "syncId": sync_id,
+                "backtestSessionId": backtest_session_id,
             }
-            self._snapshots[key]["cutoffSource"] = str(
-                payload.get("cutoffSource", "unknown")
-            )[:40]
-            try:
-                raw_cutoff = payload.get("cutoffTime")
-                cutoff = int(raw_cutoff) if raw_cutoff is not None else None
-                cutoff = cutoff if cutoff and cutoff > 0 else None
-                self._snapshots[key]["cutoffTime"] = cutoff
-            except (TypeError, ValueError, OverflowError):
-                self._snapshots[key]["cutoffTime"] = None
+            snapshot["cutoffSource"] = str(payload.get("cutoffSource", "unknown"))[:40]
+            self._snapshots[key] = snapshot
+            if cutoff is not None:
+                context_key = (
+                    key[0],
+                    timeframe,
+                    cutoff,
+                    backtest_session_id or "",
+                )
+                self._snapshot_sync_contexts[context_key] = {
+                    "syncId": sync_id,
+                    "backtestSessionId": backtest_session_id,
+                    "cutoffTime": cutoff,
+                }
+                self._snapshot_sync_contexts.move_to_end(context_key)
+                while len(self._snapshot_sync_contexts) > 4096:
+                    self._snapshot_sync_contexts.popitem(last=False)
         logger.debug("Received %d TradingView bars for %s %s", len(bars), symbol, resolution)
+        return {
+            "syncId": sync_id,
+            "backtestSessionId": backtest_session_id,
+            "cutoffTime": cutoff,
+        }
+
+    def snapshot_sync_context(
+        self,
+        symbol: str,
+        timeframe: str,
+        bar_time: int,
+    ) -> dict[str, Any] | None:
+        """Resolve an analyzed candle to the acknowledged extension snapshot."""
+        timestamp = int(bar_time)
+        if 0 < timestamp < 10_000_000_000:
+            timestamp *= 1000
+        key_symbol = _normalize_symbol(symbol)
+        key_timeframe = _normalize_timeframe(timeframe)
+        with self._lock:
+            for (stored_symbol, stored_timeframe, cutoff, _session_id), context in reversed(
+                self._snapshot_sync_contexts.items()
+            ):
+                if (
+                    stored_symbol == key_symbol
+                    and stored_timeframe == key_timeframe
+                    and cutoff == timestamp
+                ):
+                    return dict(context)
+        return None
 
     def get_snapshot(
         self, symbol: str, timeframe: str, count: int, *, cutoff_time_ms: int | None = None,
